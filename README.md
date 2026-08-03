@@ -104,6 +104,20 @@ resp, err := client.Chat().
 fmt.Println(resp.Content())
 ```
 
+To continue an existing assistant response, append it to the conversation and
+call `Continue`. The argument is added to the current `MaxTokens` value for
+that request; the final message must have the `assistant` role.
+
+```go
+chat := client.Chat().MaxTokens(128).User("Tell a story")
+resp, err := chat.Do()
+if err != nil {
+    return err
+}
+
+more, err := chat.AppendResponse(resp).Continue(128).Do()
+```
+
 ### Tool calls (function calling)
 
 ```go

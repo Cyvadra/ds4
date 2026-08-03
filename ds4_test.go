@@ -171,6 +171,32 @@ func TestChatBuilder_Prefix(t *testing.T) {
 	}
 }
 
+func TestChatBuilder_Continue(t *testing.T) {
+	req, err := ds4.New("key").Chat().
+		MaxTokens(64).
+		User("Tell a story.").
+		Assistant("Once upon a time").
+		Continue(32).
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MaxTokens != 96 {
+		t.Errorf("expected MaxTokens 96, got %d", req.MaxTokens)
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != ds4.RoleAssistant || !last.Prefix || last.Content != "Once upon a time" {
+		t.Errorf("unexpected continuation prefix: %+v", last)
+	}
+}
+
+func TestChatBuilder_ContinueRequiresFinalAssistantMessage(t *testing.T) {
+	_, err := ds4.New("key").Chat().User("Tell a story.").Continue(0).Build()
+	if err == nil {
+		t.Fatal("expected error when Continue does not follow an assistant message")
+	}
+}
+
 func TestChatBuilder_PrefixMustBeFinalAssistantMessage(t *testing.T) {
 	_, err := ds4.New("key").Chat().User("Write code").Prefix("func main() {").User("continue").Build()
 	if err == nil {
@@ -883,6 +909,33 @@ func TestClient_Chat_Prefix(t *testing.T) {
 	}
 	if resp.Content() == "" {
 		t.Error("expected non-empty content")
+	}
+}
+
+func TestClient_Chat_Continue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/beta/chat/completions" {
+			t.Errorf("expected beta continuation endpoint, got %s", r.URL.Path)
+		}
+		var req ds4.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.MaxTokens != 96 {
+			t.Errorf("expected MaxTokens 96, got %d", req.MaxTokens)
+		}
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role != ds4.RoleAssistant || !last.Prefix {
+			t.Errorf("expected final assistant prefix, got %+v", last)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatFixture())
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL)
+	_, err := client.Chat().MaxTokens(64).User("Tell a story").Assistant("Once upon a time").Continue(32).Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

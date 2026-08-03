@@ -132,6 +132,8 @@ type ChatBuilder struct {
 	model           string
 	messages        []Message
 	maxTokens       int
+	continueTokens  int
+	continueRequest bool
 	temperature     *float64
 	topP            *float64
 	stop            []string
@@ -243,6 +245,18 @@ func (b *ChatBuilder) Prefix(prefix string) *ChatBuilder {
 		Content: prefix,
 		Prefix:  true,
 	})
+	return b
+}
+
+// Continue resumes generation from the final assistant message. It enables
+// prefix completion and adds extraTokens to the request's MaxTokens value.
+// Build returns an error unless the final message has the assistant role.
+func (b *ChatBuilder) Continue(extraTokens int) *ChatBuilder {
+	b.continueRequest = true
+	b.continueTokens = extraTokens
+	if len(b.messages) > 0 {
+		b.messages[len(b.messages)-1].Prefix = true
+	}
 	return b
 }
 
@@ -375,7 +389,7 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 	req := &ChatRequest{
 		Model:           b.model,
 		Messages:        b.messages,
-		MaxTokens:       b.maxTokens,
+		MaxTokens:       b.maxTokens + b.continueTokens,
 		Temperature:     b.temperature,
 		TopP:            b.topP,
 		Stop:            b.stop,
@@ -406,12 +420,17 @@ var validEfforts = map[string]struct{}{
 }
 
 func validateChatRequest(b *ChatBuilder) error {
+	if b.continueRequest {
+		if len(b.messages) == 0 || b.messages[len(b.messages)-1].Role != RoleAssistant {
+			return fmt.Errorf("ds4: chat: Continue requires the final message to have assistant role")
+		}
+	}
 	for index, message := range b.messages {
 		if message.Prefix && (index != len(b.messages)-1 || message.Role != RoleAssistant) {
 			return fmt.Errorf("ds4: chat: prefix must be set only on the final assistant message")
 		}
 	}
-	if b.maxTokens < 0 {
+	if b.maxTokens < 0 || b.continueTokens < 0 {
 		return fmt.Errorf("ds4: chat: MaxTokens must not be negative")
 	}
 	if err := validateRange("Temperature", b.temperature, 0, 2); err != nil {
