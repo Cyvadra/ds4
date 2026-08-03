@@ -9,23 +9,22 @@ import (
 
 // ChatRequest is the JSON body sent to POST /chat/completions.
 type ChatRequest struct {
-	Model            string          `json:"model"`
-	Messages         []Message       `json:"messages"`
-	MaxTokens        int             `json:"max_tokens,omitempty"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"top_p,omitempty"`
-	Stream           bool            `json:"stream,omitempty"`
-	StreamOptions    *StreamOptions  `json:"stream_options,omitempty"`
-	Stop             []string        `json:"stop,omitempty"`
-	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
-	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
-	Thinking         *Thinking       `json:"thinking,omitempty"`
-	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
-	Tools            []Tool          `json:"tools,omitempty"`
-	ToolChoice       any             `json:"tool_choice,omitempty"`
-	LogProbs         bool            `json:"logprobs,omitempty"`
-	TopLogProbs      int             `json:"top_logprobs,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []Message       `json:"messages"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	StreamOptions   *StreamOptions  `json:"stream_options,omitempty"`
+	Stop            []string        `json:"stop,omitempty"`
+	ResponseFormat  *ResponseFormat `json:"response_format,omitempty"`
+	Thinking        *Thinking       `json:"thinking,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Tools           []Tool          `json:"tools,omitempty"`
+	ToolChoice      any             `json:"tool_choice,omitempty"`
+	LogProbs        bool            `json:"logprobs,omitempty"`
+	TopLogProbs     int             `json:"top_logprobs,omitempty"`
+	UserID          string          `json:"user_id,omitempty"`
 }
 
 // ChatResponse is the JSON body returned from POST /chat/completions.
@@ -78,11 +77,42 @@ func (r *ChatResponse) FirstMessage() *Message {
 	return &r.Choices[0].Message
 }
 
+// LogProbs returns log-probability data for the first choice, or nil when the
+// request did not enable logprobs.
+func (r *ChatResponse) LogProbs() *LogProbs {
+	if len(r.Choices) == 0 {
+		return nil
+	}
+	return r.Choices[0].LogProbs
+}
+
 // Choice is one completion alternative inside a ChatResponse.
 type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason string  `json:"finish_reason"`
+	Index        int       `json:"index"`
+	Message      Message   `json:"message"`
+	FinishReason string    `json:"finish_reason"`
+	LogProbs     *LogProbs `json:"logprobs,omitempty"`
+}
+
+// LogProbs holds log-probability data for the generated tokens of a choice.
+type LogProbs struct {
+	Content []TokenLogProb `json:"content"`
+}
+
+// TokenLogProb is the log probability of a single generated token, along with
+// the most likely alternatives at that position.
+type TokenLogProb struct {
+	Token       string       `json:"token"`
+	LogProb     float64      `json:"logprob"`
+	Bytes       []int        `json:"bytes,omitempty"`
+	TopLogProbs []TopLogProb `json:"top_logprobs,omitempty"`
+}
+
+// TopLogProb is one alternative token considered at a given position.
+type TopLogProb struct {
+	Token   string  `json:"token"`
+	LogProb float64 `json:"logprob"`
+	Bytes   []int   `json:"bytes,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -99,22 +129,21 @@ type Choice struct {
 type ChatBuilder struct {
 	client *Client
 
-	model            string
-	messages         []Message
-	maxTokens        int
-	temperature      *float64
-	topP             *float64
-	stop             []string
-	frequencyPenalty *float64
-	presencePenalty  *float64
-	responseFormat   *ResponseFormat
-	thinking         *Thinking
-	reasoningEffort  string
-	tools            []Tool
-	toolChoice       any
-	logProbs         bool
-	topLogProbs      int
-	includeUsage     bool
+	model           string
+	messages        []Message
+	maxTokens       int
+	temperature     *float64
+	topP            *float64
+	stop            []string
+	responseFormat  *ResponseFormat
+	thinking        *Thinking
+	reasoningEffort string
+	tools           []Tool
+	toolChoice      any
+	logProbs        bool
+	topLogProbs     int
+	includeUsage    bool
+	userID          string
 }
 
 func newChatBuilder(c *Client) *ChatBuilder {
@@ -181,7 +210,8 @@ func (b *ChatBuilder) AppendResponse(resp *ChatResponse) *ChatBuilder {
 
 // WithMessages replaces the entire message history.
 func (b *ChatBuilder) WithMessages(msgs []Message) *ChatBuilder {
-	b.messages = msgs
+	b.messages = make([]Message, len(msgs))
+	copy(b.messages, msgs)
 	return b
 }
 
@@ -201,10 +231,11 @@ func (b *ChatBuilder) Prefix(prefix string) *ChatBuilder {
 	return b
 }
 
-// ThinkingMode switches the model to deepseek-reasoner, which returns both a
-// chain-of-thought in ReasoningContent and a final answer in Content.
+// ThinkingMode enables thinking on the currently selected model, so the
+// response carries a chain-of-thought in ReasoningContent alongside the final
+// answer in Content. Thinking is already enabled by default server-side; use
+// Thinking(false) to turn it off.
 func (b *ChatBuilder) ThinkingMode() *ChatBuilder {
-	b.model = ModelDeepSeekReasoner
 	b.thinking = &Thinking{Type: "enabled"}
 	return b
 }
@@ -220,7 +251,9 @@ func (b *ChatBuilder) Thinking(enabled bool) *ChatBuilder {
 	return b
 }
 
-// ReasoningEffort sets the requested thinking effort: "low", "high", or "max".
+// ReasoningEffort sets the requested thinking effort: EffortLow, EffortHigh,
+// or EffortMax. The compatibility values "medium" and "xhigh" are also
+// accepted and mapped by the API.
 func (b *ChatBuilder) ReasoningEffort(effort string) *ChatBuilder {
 	b.reasoningEffort = effort
 	return b
@@ -257,15 +290,11 @@ func (b *ChatBuilder) Stop(sequences ...string) *ChatBuilder {
 	return b
 }
 
-// FrequencyPenalty reduces repetition by penalising frequently used tokens (−2.0–2.0).
-func (b *ChatBuilder) FrequencyPenalty(p float64) *ChatBuilder {
-	b.frequencyPenalty = &p
-	return b
-}
-
-// PresencePenalty encourages topic diversity by penalising tokens already present (−2.0–2.0).
-func (b *ChatBuilder) PresencePenalty(p float64) *ChatBuilder {
-	b.presencePenalty = &p
+// UserID tags the request with a caller-side identifier used for content-safety
+// review, KVCache isolation, and scheduling isolation. It must not contain
+// personal information.
+func (b *ChatBuilder) UserID(id string) *ChatBuilder {
+	b.userID = id
 	return b
 }
 
@@ -290,7 +319,8 @@ func (b *ChatBuilder) ToolChoice(choice any) *ChatBuilder {
 }
 
 // LogProbs enables log-probability output for the topN most likely tokens at
-// each generated position.
+// each generated position. topN must be between 0 and 20. Read the result via
+// ChatResponse.LogProbs.
 func (b *ChatBuilder) LogProbs(topN int) *ChatBuilder {
 	b.logProbs = true
 	b.topLogProbs = topN
@@ -328,19 +358,18 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 	}
 
 	req := &ChatRequest{
-		Model:            b.model,
-		Messages:         b.messages,
-		MaxTokens:        b.maxTokens,
-		Temperature:      b.temperature,
-		TopP:             b.topP,
-		Stop:             b.stop,
-		FrequencyPenalty: b.frequencyPenalty,
-		PresencePenalty:  b.presencePenalty,
-		ResponseFormat:   b.responseFormat,
-		Thinking:         b.thinking,
-		ReasoningEffort:  b.reasoningEffort,
-		LogProbs:         b.logProbs,
-		TopLogProbs:      b.topLogProbs,
+		Model:           b.model,
+		Messages:        b.messages,
+		MaxTokens:       b.maxTokens,
+		Temperature:     b.temperature,
+		TopP:            b.topP,
+		Stop:            b.stop,
+		ResponseFormat:  b.responseFormat,
+		Thinking:        b.thinking,
+		ReasoningEffort: b.reasoningEffort,
+		LogProbs:        b.logProbs,
+		TopLogProbs:     b.topLogProbs,
+		UserID:          b.userID,
 	}
 	if len(b.tools) > 0 {
 		req.Tools = b.tools
@@ -349,6 +378,16 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 		}
 	}
 	return req, nil
+}
+
+// validEfforts holds every value the API accepts, including the two
+// compatibility aliases it maps onto EffortHigh and EffortMax.
+var validEfforts = map[string]struct{}{
+	EffortLow:  {},
+	EffortHigh: {},
+	EffortMax:  {},
+	"medium":   {},
+	"xhigh":    {},
 }
 
 func validateChatRequest(b *ChatBuilder) error {
@@ -366,14 +405,30 @@ func validateChatRequest(b *ChatBuilder) error {
 	if err := validateRange("TopP", b.topP, 0, 1); err != nil {
 		return err
 	}
-	if err := validateRange("FrequencyPenalty", b.frequencyPenalty, -2, 2); err != nil {
-		return err
+	if b.reasoningEffort != "" {
+		if _, ok := validEfforts[b.reasoningEffort]; !ok {
+			return fmt.Errorf("ds4: chat: ReasoningEffort must be low, high, or max")
+		}
 	}
-	if err := validateRange("PresencePenalty", b.presencePenalty, -2, 2); err != nil {
-		return err
+	if b.topLogProbs < 0 || b.topLogProbs > 20 {
+		return fmt.Errorf("ds4: chat: LogProbs topN must be between 0 and 20")
 	}
-	if b.reasoningEffort != "" && b.reasoningEffort != "low" && b.reasoningEffort != "high" && b.reasoningEffort != "xhigh" && b.reasoningEffort != "max" {
-		return fmt.Errorf("ds4: chat: ReasoningEffort must be low, high, xhigh, or max")
+	return validateUserID(b.userID)
+}
+
+func validateUserID(id string) error {
+	if id == "" {
+		return nil
+	}
+	if len(id) > 512 {
+		return fmt.Errorf("ds4: chat: UserID must not exceed 512 characters")
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return fmt.Errorf("ds4: chat: UserID may only contain letters, digits, '-' and '_'")
+		}
 	}
 	return nil
 }

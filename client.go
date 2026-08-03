@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -19,17 +22,30 @@ type Client struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	maxRetries int
 }
 
 // New creates a new Client authenticated with apiKey.
 //
 //	client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"))
+//
+// The client sets no overall request deadline, because that would also cap
+// reading of streamed responses. Bound individual calls with the
+// ...WithContext variants instead.
 func New(apiKey string) *Client {
 	return &Client{
 		apiKey:  apiKey,
 		baseURL: DefaultBaseURL,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 120 * time.Second,
+			},
 		},
 	}
 }
@@ -40,9 +56,18 @@ func (c *Client) WithBaseURL(url string) *Client {
 	return c
 }
 
-// WithHTTPClient replaces the default net/http client.
+// WithHTTPClient replaces the default net/http client. Avoid setting Timeout on
+// the supplied client: it also bounds streaming response reads.
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	c.httpClient = httpClient
+	return c
+}
+
+// WithRetry retries requests that fail with a retryable status (429, 500, 503)
+// up to n additional attempts, using exponential backoff with jitter and
+// honouring any Retry-After header. Retries are disabled by default.
+func (c *Client) WithRetry(n int) *Client {
+	c.maxRetries = n
 	return c
 }
 
@@ -56,6 +81,23 @@ func (c *Client) FIM() *FIMBuilder {
 	return newFIMBuilder(c)
 }
 
+// send builds and dispatches a single HTTP attempt.
+func (c *Client) send(ctx context.Context, method, path string, data []byte, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("ds4: create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", accept)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ds4: http: %w", err)
+	}
+	return resp, nil
+}
+
 // doRequest marshals body as JSON, sends a POST to path, and returns the raw
 // response bytes on success (HTTP 200). Any non-200 status is converted to *APIError.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -64,29 +106,29 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 		return nil, fmt.Errorf("ds4: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("ds4: create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	for attempt := 0; ; attempt++ {
+		resp, err := c.send(ctx, method, path, data, "application/json")
+		if err != nil {
+			return nil, err
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ds4: http: %w", err)
-	}
-	defer resp.Body.Close()
+		respData, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("ds4: read response: %w", readErr)
+		}
+		if resp.StatusCode == http.StatusOK {
+			return respData, nil
+		}
 
-	respData, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("ds4: read response: %w", err)
+		apiErr := parseAPIError(resp.StatusCode, resp.Header, respData)
+		if attempt >= c.maxRetries || !apiErr.IsRetryable() {
+			return nil, apiErr
+		}
+		if err := waitBackoff(ctx, attempt, apiErr.RetryAfter); err != nil {
+			return nil, err
+		}
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, parseAPIError(resp.StatusCode, respData)
-	}
-	return respData, nil
 }
 
 // doStreamRequest is like doRequest but leaves the response body open for
@@ -97,25 +139,56 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 		return nil, fmt.Errorf("ds4: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("ds4: create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	for attempt := 0; ; attempt++ {
+		resp, err := c.send(ctx, method, path, data, "text/event-stream")
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp.Body, nil
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ds4: http: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
 		respData, _ := io.ReadAll(resp.Body)
-		return nil, parseAPIError(resp.StatusCode, respData)
+		resp.Body.Close()
+
+		apiErr := parseAPIError(resp.StatusCode, resp.Header, respData)
+		if attempt >= c.maxRetries || !apiErr.IsRetryable() {
+			return nil, apiErr
+		}
+		if err := waitBackoff(ctx, attempt, apiErr.RetryAfter); err != nil {
+			return nil, err
+		}
 	}
-	return resp.Body, nil
+}
+
+// waitBackoff sleeps before the next attempt, preferring the server's
+// Retry-After hint over exponential backoff with jitter.
+func waitBackoff(ctx context.Context, attempt int, retryAfter time.Duration) error {
+	const (
+		base     = 500 * time.Millisecond
+		maxDelay = 30 * time.Second
+	)
+
+	delay := retryAfter
+	if delay <= 0 {
+		delay = base << attempt
+		if delay > maxDelay || delay <= 0 {
+			delay = maxDelay
+		}
+		delay += time.Duration(rand.Int63n(int64(delay / 2)))
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // APIError is returned when the DeepSeek API responds with a non-200 status.
@@ -125,10 +198,22 @@ type APIError struct {
 	Type       string `json:"type"`
 	Param      string `json:"param"`
 	Code       any    `json:"code"`
+	// RetryAfter carries the server's Retry-After hint, when present.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("ds4: HTTP %d: %s", e.StatusCode, e.Message)
+}
+
+// IsRetryable reports whether the request may succeed if retried after a wait.
+func (e *APIError) IsRetryable() bool {
+	switch e.StatusCode {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 // errorEnvelope matches the {"error": {...}} wrapper used by the DeepSeek API.
@@ -141,7 +226,7 @@ type errorEnvelope struct {
 	} `json:"error"`
 }
 
-func parseAPIError(statusCode int, data []byte) *APIError {
+func parseAPIError(statusCode int, header http.Header, data []byte) *APIError {
 	apiErr := &APIError{StatusCode: statusCode}
 	var env errorEnvelope
 	if err := json.Unmarshal(data, &env); err == nil && env.Error.Message != "" {
@@ -151,6 +236,9 @@ func parseAPIError(statusCode int, data []byte) *APIError {
 		apiErr.Code = env.Error.Code
 	} else {
 		apiErr.Message = string(data)
+	}
+	if seconds, err := strconv.Atoi(header.Get("Retry-After")); err == nil && seconds > 0 {
+		apiErr.RetryAfter = time.Duration(seconds) * time.Second
 	}
 	return apiErr
 }

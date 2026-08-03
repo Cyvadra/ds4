@@ -11,12 +11,20 @@
 //	fmt.Println(resp.Content())
 package ds4
 
-// Model name constants.
+// Model name constants. The API accepts only these two model IDs.
 const (
-	ModelDeepSeekV4Flash  = "deepseek-v4-flash"
-	ModelDeepSeekChat     = "deepseek-chat"
-	ModelDeepSeekReasoner = "deepseek-reasoner"
-	ModelDeepSeekCoder    = "deepseek-coder"
+	ModelDeepSeekV4Flash = "deepseek-v4-flash"
+	ModelDeepSeekV4Pro   = "deepseek-v4-pro"
+)
+
+// Reasoning effort levels accepted by ReasoningEffort.
+//
+// deepseek-v4-flash honours all three. deepseek-v4-pro currently maps
+// EffortLow up to EffortHigh.
+const (
+	EffortLow  = "low"
+	EffortHigh = "high" // API default
+	EffortMax  = "max"
 )
 
 // Message role constants.
@@ -83,7 +91,8 @@ type ResponseFormat struct {
 }
 
 // Thinking controls whether the model emits reasoning_content.
-// Type must be "enabled" or "disabled".
+// Type must be "enabled" or "disabled". Thinking is enabled by default
+// server-side, so omitting this field still yields reasoning output.
 type Thinking struct {
 	Type string `json:"type"`
 }

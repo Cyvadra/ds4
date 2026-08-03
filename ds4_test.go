@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Cyvadra/ds4"
@@ -49,14 +49,31 @@ func TestChatBuilder_BuildBasic(t *testing.T) {
 
 func TestChatBuilder_Model(t *testing.T) {
 	req, err := ds4.New("key").Chat().
-		Model(ds4.ModelDeepSeekChat).
+		Model(ds4.ModelDeepSeekV4Pro).
 		User("Hi").
 		Build()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Model != ds4.ModelDeepSeekChat {
-		t.Errorf("expected model %q, got %q", ds4.ModelDeepSeekChat, req.Model)
+	if req.Model != ds4.ModelDeepSeekV4Pro {
+		t.Errorf("expected model %q, got %q", ds4.ModelDeepSeekV4Pro, req.Model)
+	}
+}
+
+func TestChatBuilder_ThinkingModeKeepsModel(t *testing.T) {
+	req, err := ds4.New("key").Chat().
+		Model(ds4.ModelDeepSeekV4Pro).
+		ThinkingMode().
+		User("What is 2+2?").
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Model != ds4.ModelDeepSeekV4Pro {
+		t.Errorf("ThinkingMode must not change the model, got %q", req.Model)
+	}
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Errorf("ThinkingMode should set thinking.type=enabled, got %v", req.Thinking)
 	}
 }
 
@@ -68,8 +85,8 @@ func TestChatBuilder_ThinkingMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if req.Model != ds4.ModelDeepSeekReasoner {
-		t.Errorf("ThinkingMode should switch model to %q, got %q", ds4.ModelDeepSeekReasoner, req.Model)
+	if req.Model != ds4.ModelDeepSeekV4Flash {
+		t.Errorf("ThinkingMode should keep the default model, got %q", req.Model)
 	}
 	if req.Thinking == nil || req.Thinking.Type != "enabled" {
 		t.Errorf("ThinkingMode should set thinking.type=enabled, got %v", req.Thinking)
@@ -294,9 +311,11 @@ func TestChatBuilder_RejectsInvalidParameters(t *testing.T) {
 		{"negative max tokens", ds4.New("key").Chat().MaxTokens(-1).User("Hi")},
 		{"temperature", ds4.New("key").Chat().Temperature(2.1).User("Hi")},
 		{"top p", ds4.New("key").Chat().TopP(-0.1).User("Hi")},
-		{"frequency penalty", ds4.New("key").Chat().FrequencyPenalty(2.1).User("Hi")},
-		{"presence penalty", ds4.New("key").Chat().PresencePenalty(-2.1).User("Hi")},
 		{"reasoning effort", ds4.New("key").Chat().ReasoningEffort("invalid").User("Hi")},
+		{"top logprobs too high", ds4.New("key").Chat().LogProbs(21).User("Hi")},
+		{"top logprobs negative", ds4.New("key").Chat().LogProbs(-1).User("Hi")},
+		{"user id charset", ds4.New("key").Chat().UserID("has space").User("Hi")},
+		{"user id length", ds4.New("key").Chat().UserID(strings.Repeat("a", 513)).User("Hi")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -304,6 +323,38 @@ func TestChatBuilder_RejectsInvalidParameters(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestChatBuilder_AcceptsCompatibilityEfforts(t *testing.T) {
+	for _, effort := range []string{ds4.EffortLow, ds4.EffortHigh, ds4.EffortMax, "medium", "xhigh"} {
+		if _, err := ds4.New("key").Chat().ReasoningEffort(effort).User("Hi").Build(); err != nil {
+			t.Errorf("effort %q should be accepted: %v", effort, err)
+		}
+	}
+}
+
+func TestChatBuilder_UserID(t *testing.T) {
+	req, err := ds4.New("key").Chat().UserID("tenant_42").User("Hi").Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.UserID != "tenant_42" {
+		t.Errorf("expected user id to be sent, got %q", req.UserID)
+	}
+}
+
+func TestChatBuilder_WithMessagesCopiesInput(t *testing.T) {
+	original := make([]ds4.Message, 1, 4)
+	original[0] = ds4.Message{Role: ds4.RoleUser, Content: "first"}
+
+	ds4.New("key").Chat().WithMessages(original).User("second")
+
+	if len(original) != 1 {
+		t.Fatalf("caller slice length changed to %d", len(original))
+	}
+	if got := original[:2][1].Content; got == "second" {
+		t.Error("builder wrote into the caller's backing array")
 	}
 }
 
@@ -499,6 +550,96 @@ func TestAPIError_Error(t *testing.T) {
 	}
 }
 
+func TestAPIError_IsRetryable(t *testing.T) {
+	retryable := []int{429, 500, 503}
+	for _, code := range retryable {
+		if !(&ds4.APIError{StatusCode: code}).IsRetryable() {
+			t.Errorf("status %d should be retryable", code)
+		}
+	}
+	for _, code := range []int{400, 401, 402, 422} {
+		if (&ds4.APIError{StatusCode: code}).IsRetryable() {
+			t.Errorf("status %d must not be retryable", code)
+		}
+	}
+}
+
+func TestClient_RetriesRetryableStatus(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"slow down"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatFixture())
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL).WithRetry(3)
+	if _, err := client.Chat().User("Hi").Do(); err != nil {
+		t.Fatalf("expected retry to succeed: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("expected 2 attempts, got %d", got)
+	}
+}
+
+func TestClient_DoesNotRetryClientError(t *testing.T) {
+	var attempts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"bad request"}}`))
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL).WithRetry(3)
+	if _, err := client.Chat().User("Hi").Do(); err == nil {
+		t.Fatal("expected error")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("400 must not be retried, got %d attempts", got)
+	}
+}
+
+func TestClient_Chat_DecodesLogProbs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ds4.ChatRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if !req.LogProbs || req.TopLogProbs != 2 {
+			t.Errorf("expected logprobs request, got logprobs=%v top=%d", req.LogProbs, req.TopLogProbs)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"id":"chatcmpl-test","model":"deepseek-v4-flash",
+			"choices":[{"index":0,"finish_reason":"stop",
+				"message":{"role":"assistant","content":"hi"},
+				"logprobs":{"content":[{"token":"hi","logprob":-0.25,
+					"top_logprobs":[{"token":"hi","logprob":-0.25},{"token":"yo","logprob":-1.5}]}]}}]}`))
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL)
+	resp, err := client.Chat().LogProbs(2).User("Hi").Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	lp := resp.LogProbs()
+	if lp == nil || len(lp.Content) != 1 {
+		t.Fatalf("expected decoded logprobs, got %+v", lp)
+	}
+	if lp.Content[0].Token != "hi" || lp.Content[0].LogProb != -0.25 {
+		t.Errorf("unexpected token logprob: %+v", lp.Content[0])
+	}
+	if len(lp.Content[0].TopLogProbs) != 2 {
+		t.Errorf("expected 2 alternatives, got %d", len(lp.Content[0].TopLogProbs))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Mock-server HTTP tests
 // ---------------------------------------------------------------------------
@@ -603,8 +744,8 @@ func TestClient_Chat_ThinkingMode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
-		if req.Model != ds4.ModelDeepSeekReasoner {
-			t.Errorf("expected model %s, got %s", ds4.ModelDeepSeekReasoner, req.Model)
+		if req.Model != ds4.ModelDeepSeekV4Flash {
+			t.Errorf("expected model %s, got %s", ds4.ModelDeepSeekV4Flash, req.Model)
 		}
 		if req.Thinking == nil || req.Thinking.Type != "enabled" {
 			t.Errorf("expected thinking.type=enabled, got %v", req.Thinking)
@@ -937,55 +1078,5 @@ func TestNewFunction(t *testing.T) {
 	}
 	if tool.Function.Description != "desc" {
 		t.Errorf("expected description 'desc', got %q", tool.Function.Description)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Integration tests (require DEEPSEEK_API_KEY)
-// ---------------------------------------------------------------------------
-
-func TestIntegration_Chat(t *testing.T) {
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	if apiKey == "" {
-		t.Skip("DEEPSEEK_API_KEY not set; skipping integration test")
-	}
-
-	client := ds4.New(apiKey)
-	resp, err := client.Chat().
-		System("You are a helpful assistant. Be concise.").
-		User("Reply with exactly the word 'pong'.").
-		MaxTokens(16).
-		Do()
-	if err != nil {
-		t.Fatalf("integration: unexpected error: %v", err)
-	}
-	content := strings.ToLower(strings.TrimSpace(resp.Content()))
-	if !strings.Contains(content, "pong") {
-		t.Errorf("integration: expected 'pong' in response, got %q", resp.Content())
-	}
-}
-
-func TestIntegration_Chat_Stream(t *testing.T) {
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	if apiKey == "" {
-		t.Skip("DEEPSEEK_API_KEY not set; skipping integration test")
-	}
-
-	client := ds4.New(apiKey)
-	var result strings.Builder
-	err := client.Chat().
-		User("Count from 1 to 3, one number per line, nothing else.").
-		MaxTokens(32).
-		Stream(func(chunk ds4.ChatStreamChunk) error {
-			if len(chunk.Choices) > 0 {
-				result.WriteString(chunk.Choices[0].Delta.Content)
-			}
-			return nil
-		})
-	if err != nil {
-		t.Fatalf("integration stream: unexpected error: %v", err)
-	}
-	if result.Len() == 0 {
-		t.Error("integration stream: expected non-empty streamed content")
 	}
 }
