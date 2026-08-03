@@ -16,13 +16,20 @@ import "github.com/Cyvadra/ds4"
 client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"))
 ```
 
+New chats include the system prompt `You are a helpful assistant.`. Pass a
+second argument to `New` to set a client-specific default; `System` replaces
+that prompt for an individual chat.
+
+```go
+client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"), "Answer concisely in Chinese.")
+```
+
 ---
 
 ## Chat completions
 
 ```go
 resp, err := client.Chat().
-    System("You are a helpful assistant.").
     User("What is Go?").
     Do()
 fmt.Println(resp.Content())

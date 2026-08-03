@@ -17,11 +17,23 @@ import (
 // Builder unit tests – no network required
 // ---------------------------------------------------------------------------
 
-func TestChatBuilder_BuildRequiresMessages(t *testing.T) {
-	b := ds4.New("key").Chat()
-	_, err := b.Build()
-	if err == nil {
-		t.Fatal("expected error when no messages provided")
+func TestChatBuilder_DefaultSystemPrompt(t *testing.T) {
+	req, err := ds4.New("key").Chat().Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != ds4.RoleSystem || req.Messages[0].Content != ds4.DefaultSystemPrompt {
+		t.Fatalf("expected default system prompt, got %+v", req.Messages)
+	}
+}
+
+func TestChatBuilder_CustomSystemPrompt(t *testing.T) {
+	req, err := ds4.New("key", "Answer in haiku.").Chat().System("Answer in JSON.").Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Content != "Answer in JSON." {
+		t.Fatalf("expected overridden system prompt, got %+v", req.Messages)
 	}
 }
 
@@ -252,7 +264,7 @@ func TestChatBuilder_AppendResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := req.Messages[1]
+	message := req.Messages[len(req.Messages)-2]
 	if message.ReasoningContent != "reasoning" || len(message.ToolCalls) != 1 {
 		t.Errorf("AppendResponse did not preserve the assistant message: %+v", message)
 	}
@@ -391,8 +403,9 @@ func TestChatBuilder_AddMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Messages[0].Content != "raw message" {
-		t.Errorf("unexpected content: %q", req.Messages[0].Content)
+	message := req.Messages[len(req.Messages)-1]
+	if message.Content != "raw message" {
+		t.Errorf("unexpected content: %q", message.Content)
 	}
 }
 

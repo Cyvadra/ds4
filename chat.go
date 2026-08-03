@@ -148,8 +148,9 @@ type ChatBuilder struct {
 
 func newChatBuilder(c *Client) *ChatBuilder {
 	return &ChatBuilder{
-		client: c,
-		model:  ModelDeepSeekV4Flash,
+		client:   c,
+		model:    ModelDeepSeekV4Flash,
+		messages: []Message{{Role: RoleSystem, Content: c.systemPrompt}},
 	}
 }
 
@@ -159,8 +160,15 @@ func (b *ChatBuilder) Model(model string) *ChatBuilder {
 	return b
 }
 
-// System appends a system message to the conversation.
+// System replaces the conversation's system prompt. If the message history
+// contains no system message, it appends one.
 func (b *ChatBuilder) System(content string) *ChatBuilder {
+	for index, message := range b.messages {
+		if message.Role == RoleSystem {
+			b.messages[index].Content = content
+			return b
+		}
+	}
 	b.messages = append(b.messages, Message{Role: RoleSystem, Content: content})
 	return b
 }

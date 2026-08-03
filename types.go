@@ -5,7 +5,6 @@
 //	client := ds4.New("YOUR_API_KEY")
 //
 //	resp, err := client.Chat().
-//	    System("You are a helpful assistant.").
 //	    User("Hello!").
 //	    Do()
 //	fmt.Println(resp.Content())

@@ -16,26 +16,36 @@ import (
 // DefaultBaseURL is the root URL for all DeepSeek API calls.
 const DefaultBaseURL = "https://api.deepseek.com"
 
+// DefaultSystemPrompt is included as the first message of every new chat.
+const DefaultSystemPrompt = "You are a helpful assistant."
+
 // Client is the entry point for all DeepSeek API interactions.
 // Create one with New and then call Chat() or FIM() to start building requests.
 type Client struct {
-	apiKey     string
-	baseURL    string
-	httpClient *http.Client
-	maxRetries int
+	apiKey       string
+	baseURL      string
+	httpClient   *http.Client
+	maxRetries   int
+	systemPrompt string
 }
 
-// New creates a new Client authenticated with apiKey.
+// New creates a new Client authenticated with apiKey. An optional defaultSystemPrompt
+// replaces DefaultSystemPrompt for chats created by this client.
 //
 //	client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"))
 //
 // The client sets no overall request deadline, because that would also cap
 // reading of streamed responses. Bound individual calls with the
 // ...WithContext variants instead.
-func New(apiKey string) *Client {
+func New(apiKey string, defaultSystemPrompt ...string) *Client {
+	systemPrompt := DefaultSystemPrompt
+	if len(defaultSystemPrompt) > 0 && defaultSystemPrompt[0] != "" {
+		systemPrompt = defaultSystemPrompt[0]
+	}
 	return &Client{
-		apiKey:  apiKey,
-		baseURL: DefaultBaseURL,
+		apiKey:       apiKey,
+		baseURL:      DefaultBaseURL,
+		systemPrompt: systemPrompt,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
