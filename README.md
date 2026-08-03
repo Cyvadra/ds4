@@ -40,15 +40,28 @@ fmt.Println(resp2.Content())
 
 ### Thinking mode
 
+Thinking is **enabled by default** by the API, with effort `high`. Reasoning
+tokens are billed at output rates, so disable it explicitly for latency- or
+cost-sensitive calls.
+
 ```go
 resp, err := client.Chat().
     ThinkingMode().
-    ReasoningEffort("high").
+    ReasoningEffort(ds4.EffortMax).
     User("Prove that sqrt(2) is irrational.").
     Do()
 fmt.Println("Reasoning:", resp.ReasoningContent())
 fmt.Println("Answer:   ", resp.Content())
 ```
+
+`ThinkingMode()` toggles reasoning on the model you already selected; it never
+changes the model. To turn reasoning off:
+
+```go
+resp, err := client.Chat().Thinking(false).User("Ping").Do()
+```
+
+Thinking mode ignores `Temperature` and `TopP`.
 
 ### JSON mode
 
@@ -164,30 +177,43 @@ err := client.FIM().
 | Method | Description |
 |--------|-------------|
 | `Model(name)` | Override the model (default: `deepseek-v4-flash`) |
-| `Temperature(t)` | Sampling temperature 0–2 |
-| `TopP(p)` | Nucleus sampling 0–1 |
+| `Temperature(t)` | Sampling temperature 0–2 (ignored in thinking mode) |
+| `TopP(p)` | Nucleus sampling 0–1 (ignored in thinking mode) |
 | `MaxTokens(n)` | Max tokens to generate |
 | `Stop(seq...)` | Stop sequences |
-| `FrequencyPenalty(p)` | Reduce repetition |
-| `PresencePenalty(p)` | Encourage new topics |
-| `LogProbs(topN)` | Return log probabilities |
+| `LogProbs(topN)` | Return log probabilities, `topN` 0–20 |
+| `UserID(id)` | Tag the request for cache isolation and safety review |
 | `IncludeStreamUsage()` | Include token usage in final stream chunk |
 | `Thinking(enabled)` | Enable or disable thinking output |
 | `ReasoningEffort(level)` | Request `low`, `high`, or `max` thinking effort |
 | `Clone()` | Deep-copy builder (fork a conversation) |
 
+Read log probabilities from the response:
+
+```go
+resp, _ := client.Chat().LogProbs(5).User("Hi").Do()
+for _, tok := range resp.LogProbs().Content {
+    fmt.Println(tok.Token, tok.LogProb)
+}
+```
+
+`frequency_penalty` and `presence_penalty` are deprecated by the API and have
+no effect, so this client does not send them.
+
 ## Model constants
 
 ```go
-ds4.ModelDeepSeekV4Flash  // "deepseek-v4-flash"  (default)
-ds4.ModelDeepSeekChat     // "deepseek-chat"
-ds4.ModelDeepSeekReasoner // "deepseek-reasoner"  (thinking mode)
-ds4.ModelDeepSeekCoder    // "deepseek-coder"
+ds4.ModelDeepSeekV4Flash // "deepseek-v4-flash" (default)
+ds4.ModelDeepSeekV4Pro   // "deepseek-v4-pro"
 ```
+
+Effort levels: `ds4.EffortLow`, `ds4.EffortHigh` (API default), `ds4.EffortMax`.
 
 ## Context support
 
-Every `Do()` / `Stream()` method has a `...WithContext(ctx)` variant:
+The client sets no overall request deadline, because that would also cut off
+streamed responses mid-generation. Bound individual calls with the
+`...WithContext(ctx)` variant of every `Do()` / `Stream()` method:
 
 ```go
 ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -205,4 +231,21 @@ API errors can be inspected via type assertion:
 if apiErr, ok := err.(*ds4.APIError); ok {
     fmt.Println(apiErr.StatusCode, apiErr.Message)
 }
+```
+
+Retries are opt-in and apply only to retryable statuses (429, 500, 503), using
+exponential backoff with jitter and honouring `Retry-After`:
+
+```go
+client := ds4.New(apiKey).WithRetry(3)
+```
+
+## Real API tests
+
+The integration suite makes billable requests against every supported feature,
+including both V4 models, thinking, JSON, logprobs, streaming, tools, prefix
+completion, and FIM. It skips when `DEEPSEEK_API_KEY` is absent.
+
+```sh
+DEEPSEEK_API_KEY=your_key go test -run '^TestIntegration_AllFeatures$' -v
 ```
