@@ -27,7 +27,7 @@ func TestChatBuilder_BuildRequiresMessages(t *testing.T) {
 
 func TestChatBuilder_BuildBasic(t *testing.T) {
 	req, err := ds4.New("key").Chat().
-		System("You are helpful.").
+		System("You are helpful assistant.").
 		User("Hello").
 		Build()
 	if err != nil {
@@ -71,6 +71,26 @@ func TestChatBuilder_ThinkingMode(t *testing.T) {
 	if req.Model != ds4.ModelDeepSeekReasoner {
 		t.Errorf("ThinkingMode should switch model to %q, got %q", ds4.ModelDeepSeekReasoner, req.Model)
 	}
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Errorf("ThinkingMode should set thinking.type=enabled, got %v", req.Thinking)
+	}
+}
+
+func TestChatBuilder_ThinkingControls(t *testing.T) {
+	req, err := ds4.New("key").Chat().
+		Thinking(false).
+		ReasoningEffort("max").
+		User("Hi").
+		Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Thinking == nil || req.Thinking.Type != "disabled" {
+		t.Errorf("expected thinking.type=disabled, got %v", req.Thinking)
+	}
+	if req.ReasoningEffort != "max" {
+		t.Errorf("expected reasoning effort max, got %q", req.ReasoningEffort)
+	}
 }
 
 func TestChatBuilder_JSONMode(t *testing.T) {
@@ -103,6 +123,18 @@ func TestChatBuilder_Prefix(t *testing.T) {
 	}
 	if last.Content != "func hello() {\n" {
 		t.Errorf("unexpected prefix content: %q", last.Content)
+	}
+}
+
+func TestChatBuilder_PrefixMustBeFinalAssistantMessage(t *testing.T) {
+	_, err := ds4.New("key").Chat().User("Write code").Prefix("func main() {").User("continue").Build()
+	if err == nil {
+		t.Fatal("expected error when prefix is not the final message")
+	}
+
+	_, err = ds4.New("key").Chat().AddMessage(ds4.Message{Role: ds4.RoleUser, Content: "x", Prefix: true}).Build()
+	if err == nil {
+		t.Fatal("expected error when prefix message is not an assistant message")
 	}
 }
 
@@ -146,8 +178,15 @@ func TestChatBuilder_ToolChoice(t *testing.T) {
 	}
 }
 
+func TestNewStrictFunction(t *testing.T) {
+	tool := ds4.NewStrictFunction("fn", "", map[string]any{"type": "object"})
+	if !tool.Function.Strict {
+		t.Error("NewStrictFunction should set Function.Strict")
+	}
+}
+
 func TestChatBuilder_MultiRound(t *testing.T) {
-	b := ds4.New("key").Chat().System("You are helpful.")
+	b := ds4.New("key").Chat().System("You are helpful assistant.")
 
 	// Simulate adding messages for a multi-round conversation.
 	b.User("First question")
@@ -183,6 +222,22 @@ func TestChatBuilder_ToolResult(t *testing.T) {
 	}
 	if last.ToolCallID != "call_abc123" {
 		t.Errorf("unexpected ToolCallID: %q", last.ToolCallID)
+	}
+}
+
+func TestChatBuilder_AppendResponse(t *testing.T) {
+	resp := &ds4.ChatResponse{Choices: []ds4.Choice{{Message: ds4.Message{
+		Role:             ds4.RoleAssistant,
+		ReasoningContent: "reasoning",
+		ToolCalls:        []ds4.ToolCall{{ID: "call_1", Type: "function"}},
+	}}}}
+	req, err := ds4.New("key").Chat().User("Weather?").AppendResponse(resp).ToolResult("call_1", "sunny").Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := req.Messages[1]
+	if message.ReasoningContent != "reasoning" || len(message.ToolCalls) != 1 {
+		t.Errorf("AppendResponse did not preserve the assistant message: %+v", message)
 	}
 }
 
@@ -228,6 +283,27 @@ func TestChatBuilder_MaxTokens(t *testing.T) {
 	}
 	if req.MaxTokens != 512 {
 		t.Errorf("expected MaxTokens 512, got %d", req.MaxTokens)
+	}
+}
+
+func TestChatBuilder_RejectsInvalidParameters(t *testing.T) {
+	tests := []struct {
+		name    string
+		builder *ds4.ChatBuilder
+	}{
+		{"negative max tokens", ds4.New("key").Chat().MaxTokens(-1).User("Hi")},
+		{"temperature", ds4.New("key").Chat().Temperature(2.1).User("Hi")},
+		{"top p", ds4.New("key").Chat().TopP(-0.1).User("Hi")},
+		{"frequency penalty", ds4.New("key").Chat().FrequencyPenalty(2.1).User("Hi")},
+		{"presence penalty", ds4.New("key").Chat().PresencePenalty(-2.1).User("Hi")},
+		{"reasoning effort", ds4.New("key").Chat().ReasoningEffort("invalid").User("Hi")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.builder.Build(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 
@@ -310,6 +386,25 @@ func TestFIMBuilder_Echo(t *testing.T) {
 	}
 	if !req.Echo {
 		t.Error("Echo should be true")
+	}
+}
+
+func TestFIMBuilder_MaxTokensLimit(t *testing.T) {
+	_, err := ds4.New("key").FIM().Prompt("p").MaxTokens(4097).Build()
+	if err == nil {
+		t.Fatal("expected error when max tokens exceeds 4096")
+	}
+}
+
+func TestFIMBuilder_RejectsInvalidParameters(t *testing.T) {
+	if _, err := ds4.New("key").FIM().Prompt("p").MaxTokens(-1).Build(); err == nil {
+		t.Fatal("expected negative MaxTokens error")
+	}
+	if _, err := ds4.New("key").FIM().Prompt("p").Temperature(2.1).Build(); err == nil {
+		t.Fatal("expected Temperature range error")
+	}
+	if _, err := ds4.New("key").FIM().Prompt("p").TopP(-0.1).Build(); err == nil {
+		t.Fatal("expected TopP range error")
 	}
 }
 
@@ -511,6 +606,9 @@ func TestClient_Chat_ThinkingMode(t *testing.T) {
 		if req.Model != ds4.ModelDeepSeekReasoner {
 			t.Errorf("expected model %s, got %s", ds4.ModelDeepSeekReasoner, req.Model)
 		}
+		if req.Thinking == nil || req.Thinking.Type != "enabled" {
+			t.Errorf("expected thinking.type=enabled, got %v", req.Thinking)
+		}
 
 		resp := chatFixture()
 		resp.Choices[0].Message.ReasoningContent = "step-by-step reasoning"
@@ -583,6 +681,9 @@ func TestClient_Chat_ToolCalls(t *testing.T) {
 
 func TestClient_Chat_Prefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/beta/chat/completions" {
+			t.Errorf("expected beta prefix endpoint, got %s", r.URL.Path)
+		}
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
@@ -612,6 +713,30 @@ func TestClient_Chat_Prefix(t *testing.T) {
 	}
 	if resp.Content() == "" {
 		t.Error("expected non-empty content")
+	}
+}
+
+func TestClient_Chat_StrictToolUsesBetaEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/beta/chat/completions" {
+			t.Errorf("expected beta strict-tool endpoint, got %s", r.URL.Path)
+		}
+		var req ds4.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if len(req.Tools) != 1 || !req.Tools[0].Function.Strict {
+			t.Errorf("expected strict function tool, got %+v", req.Tools)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(chatFixture())
+	}))
+	defer srv.Close()
+
+	tool := ds4.NewStrictFunction("get_weather", "Get weather", map[string]any{"type": "object"})
+	_, err := ds4.New("key").WithBaseURL(srv.URL).Chat().Tool(tool).User("Weather?").Do()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -650,6 +775,27 @@ func TestClient_Chat_Stream(t *testing.T) {
 	}
 	if result.String() != "Hello!" {
 		t.Errorf("expected 'Hello!', got %q", result.String())
+	}
+}
+
+func TestClient_Chat_StreamToolCallIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"weather","arguments":"{\"city\":\""}},{"index":1,"id":"call_b","type":"function","function":{"name":"time","arguments":"{\"zone\":\""}}]},"finish_reason":null}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer srv.Close()
+
+	var toolCalls []ds4.StreamToolCall
+	err := ds4.New("key").WithBaseURL(srv.URL).Chat().User("Hi").Stream(func(chunk ds4.ChatStreamChunk) error {
+		toolCalls = chunk.Choices[0].Delta.ToolCalls
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolCalls) != 2 || toolCalls[0].Index != 0 || toolCalls[1].Index != 1 {
+		t.Errorf("expected indexed stream tool calls, got %+v", toolCalls)
 	}
 }
 

@@ -26,10 +26,19 @@ type StreamChoice struct {
 
 // Delta holds the incremental content fields for a streaming chunk.
 type Delta struct {
-	Role             string     `json:"role"`
-	Content          string     `json:"content"`
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []StreamToolCall `json:"tool_calls,omitempty"`
+}
+
+// StreamToolCall is an incremental tool call. Index identifies the call when
+// multiple tool calls are interleaved across streaming chunks.
+type StreamToolCall struct {
+	Index    int          `json:"index"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function FunctionCall `json:"function"`
 }
 
 // FIMStreamChunk is a single incremental piece of a streaming FIM completion.
@@ -52,6 +61,7 @@ type FIMStreamChoice struct {
 // "data: ..." line. It stops when it sees "data: [DONE]" or the reader is exhausted.
 func parseSSE(r io.Reader, handler func([]byte) error) error {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {

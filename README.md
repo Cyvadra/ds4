@@ -31,18 +31,19 @@ fmt.Println(resp.Content())
 ### Multi-round chat
 
 ```go
-b := client.Chat().System("You are helpful.")
+b := client.Chat().System("You are helpful assistant.")
 
 resp1, _ := b.User("What is a goroutine?").Do()
 resp2, _ := b.Assistant(resp1.Content()).User("How do I cancel one?").Do()
 fmt.Println(resp2.Content())
 ```
 
-### Thinking mode (deepseek-reasoner)
+### Thinking mode
 
 ```go
 resp, err := client.Chat().
     ThinkingMode().
+    ReasoningEffort("high").
     User("Prove that sqrt(2) is irrational.").
     Do()
 fmt.Println("Reasoning:", resp.ReasoningContent())
@@ -59,9 +60,11 @@ resp, err := client.Chat().
 fmt.Println(resp.Content()) // {"name":"Alice","age":30}
 ```
 
+Include `json` in the system or user prompt and reserve enough `MaxTokens` for a complete object.
+
 ### Chat prefix completion (beta)
 
-The model continues generating from the supplied prefix:
+The model continues generating from the supplied prefix. The client routes this beta feature through `/beta/chat/completions`.
 
 ```go
 resp, err := client.Chat().
@@ -95,6 +98,23 @@ if resp.FinishReason() == ds4.FinishReasonToolCalls {
 }
 ```
 
+Use `ds4.NewStrictFunction` to enforce a tool's JSON Schema. Strict tools are beta features and are automatically routed through `/beta/chat/completions`.
+
+To continue after a tool call, append the full assistant response before adding each tool result:
+
+```go
+chat := client.Chat().Tool(weather).User("What's the weather like in Tokyo?")
+resp, err := chat.Do()
+if err != nil {
+    return err
+}
+chat.AppendResponse(resp)
+for _, call := range resp.ToolCalls() {
+    chat.ToolResult(call.ID, `{"temperature": 24}`)
+}
+resp, err = chat.Do()
+```
+
 ### Streaming
 
 ```go
@@ -120,6 +140,8 @@ resp, err := client.FIM().
     Do()
 fmt.Println(resp.Text())
 ```
+
+FIM `MaxTokens` must be between `0` and `4096`.
 
 ### FIM streaming
 
@@ -150,6 +172,8 @@ err := client.FIM().
 | `PresencePenalty(p)` | Encourage new topics |
 | `LogProbs(topN)` | Return log probabilities |
 | `IncludeStreamUsage()` | Include token usage in final stream chunk |
+| `Thinking(enabled)` | Enable or disable thinking output |
+| `ReasoningEffort(level)` | Request `low`, `high`, or `max` thinking effort |
 | `Clone()` | Deep-copy builder (fork a conversation) |
 
 ## Model constants

@@ -136,6 +136,18 @@ func (b *FIMBuilder) Build() (*FIMRequest, error) {
 	if b.prompt == "" {
 		return nil, fmt.Errorf("ds4: fim: Prompt is required")
 	}
+	if b.maxTokens > 4096 {
+		return nil, fmt.Errorf("ds4: fim: MaxTokens must not exceed 4096")
+	}
+	if b.maxTokens < 0 {
+		return nil, fmt.Errorf("ds4: fim: MaxTokens must not be negative")
+	}
+	if err := validateRange("Temperature", b.temperature, 0, 2); err != nil {
+		return nil, err
+	}
+	if err := validateRange("TopP", b.topP, 0, 1); err != nil {
+		return nil, err
+	}
 	return &FIMRequest{
 		Model:       b.model,
 		Prompt:      b.prompt,

@@ -58,6 +58,7 @@ type Tool struct {
 type Function struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	Strict      bool   `json:"strict,omitempty"`
 	// Parameters should be a JSON Schema object describing the function's parameters.
 	Parameters any `json:"parameters,omitempty"`
 }
@@ -78,6 +79,12 @@ type FunctionCall struct {
 // ResponseFormat specifies the format of the model's output.
 type ResponseFormat struct {
 	// Type is "text" (default) or "json_object".
+	Type string `json:"type"`
+}
+
+// Thinking controls whether the model emits reasoning_content.
+// Type must be "enabled" or "disabled".
+type Thinking struct {
 	Type string `json:"type"`
 }
 
@@ -115,4 +122,12 @@ func NewFunction(name, description string, parameters any) Tool {
 			Parameters:  parameters,
 		},
 	}
+}
+
+// NewStrictFunction creates a function tool that asks the beta API to enforce
+// its JSON Schema when generating tool call arguments.
+func NewStrictFunction(name, description string, parameters any) Tool {
+	tool := NewFunction(name, description, parameters)
+	tool.Function.Strict = true
+	return tool
 }

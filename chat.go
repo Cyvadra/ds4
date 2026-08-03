@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 )
 
 // ChatRequest is the JSON body sent to POST /chat/completions.
@@ -19,6 +20,8 @@ type ChatRequest struct {
 	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
 	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
 	ResponseFormat   *ResponseFormat `json:"response_format,omitempty"`
+	Thinking         *Thinking       `json:"thinking,omitempty"`
+	ReasoningEffort  string          `json:"reasoning_effort,omitempty"`
 	Tools            []Tool          `json:"tools,omitempty"`
 	ToolChoice       any             `json:"tool_choice,omitempty"`
 	LogProbs         bool            `json:"logprobs,omitempty"`
@@ -105,6 +108,8 @@ type ChatBuilder struct {
 	frequencyPenalty *float64
 	presencePenalty  *float64
 	responseFormat   *ResponseFormat
+	thinking         *Thinking
+	reasoningEffort  string
 	tools            []Tool
 	toolChoice       any
 	logProbs         bool
@@ -164,6 +169,16 @@ func (b *ChatBuilder) AddMessage(msg Message) *ChatBuilder {
 	return b
 }
 
+// AppendResponse appends the first assistant message from resp to the
+// conversation history. It preserves tool_calls and reasoning_content for a
+// subsequent tool-result or user turn.
+func (b *ChatBuilder) AppendResponse(resp *ChatResponse) *ChatBuilder {
+	if message := resp.FirstMessage(); message != nil {
+		b.messages = append(b.messages, *message)
+	}
+	return b
+}
+
 // WithMessages replaces the entire message history.
 func (b *ChatBuilder) WithMessages(msgs []Message) *ChatBuilder {
 	b.messages = msgs
@@ -190,6 +205,24 @@ func (b *ChatBuilder) Prefix(prefix string) *ChatBuilder {
 // chain-of-thought in ReasoningContent and a final answer in Content.
 func (b *ChatBuilder) ThinkingMode() *ChatBuilder {
 	b.model = ModelDeepSeekReasoner
+	b.thinking = &Thinking{Type: "enabled"}
+	return b
+}
+
+// Thinking sets the thinking-mode toggle. Enabled thinking returns
+// reasoning_content alongside the final content.
+func (b *ChatBuilder) Thinking(enabled bool) *ChatBuilder {
+	typeName := "disabled"
+	if enabled {
+		typeName = "enabled"
+	}
+	b.thinking = &Thinking{Type: typeName}
+	return b
+}
+
+// ReasoningEffort sets the requested thinking effort: "low", "high", or "max".
+func (b *ChatBuilder) ReasoningEffort(effort string) *ChatBuilder {
+	b.reasoningEffort = effort
 	return b
 }
 
@@ -290,6 +323,9 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 	if len(b.messages) == 0 {
 		return nil, fmt.Errorf("ds4: chat: at least one message is required")
 	}
+	if err := validateChatRequest(b); err != nil {
+		return nil, err
+	}
 
 	req := &ChatRequest{
 		Model:            b.model,
@@ -301,6 +337,8 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 		FrequencyPenalty: b.frequencyPenalty,
 		PresencePenalty:  b.presencePenalty,
 		ResponseFormat:   b.responseFormat,
+		Thinking:         b.thinking,
+		ReasoningEffort:  b.reasoningEffort,
 		LogProbs:         b.logProbs,
 		TopLogProbs:      b.topLogProbs,
 	}
@@ -311,6 +349,40 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 		}
 	}
 	return req, nil
+}
+
+func validateChatRequest(b *ChatBuilder) error {
+	for index, message := range b.messages {
+		if message.Prefix && (index != len(b.messages)-1 || message.Role != RoleAssistant) {
+			return fmt.Errorf("ds4: chat: prefix must be set only on the final assistant message")
+		}
+	}
+	if b.maxTokens < 0 {
+		return fmt.Errorf("ds4: chat: MaxTokens must not be negative")
+	}
+	if err := validateRange("Temperature", b.temperature, 0, 2); err != nil {
+		return err
+	}
+	if err := validateRange("TopP", b.topP, 0, 1); err != nil {
+		return err
+	}
+	if err := validateRange("FrequencyPenalty", b.frequencyPenalty, -2, 2); err != nil {
+		return err
+	}
+	if err := validateRange("PresencePenalty", b.presencePenalty, -2, 2); err != nil {
+		return err
+	}
+	if b.reasoningEffort != "" && b.reasoningEffort != "low" && b.reasoningEffort != "high" && b.reasoningEffort != "xhigh" && b.reasoningEffort != "max" {
+		return fmt.Errorf("ds4: chat: ReasoningEffort must be low, high, xhigh, or max")
+	}
+	return nil
+}
+
+func validateRange(name string, value *float64, minimum, maximum float64) error {
+	if value != nil && (math.IsNaN(*value) || *value < minimum || *value > maximum) {
+		return fmt.Errorf("ds4: chat: %s must be between %g and %g", name, minimum, maximum)
+	}
+	return nil
 }
 
 // Do sends the chat completion request and returns the full response.
@@ -325,7 +397,7 @@ func (b *ChatBuilder) DoWithContext(ctx context.Context) (*ChatResponse, error) 
 		return nil, err
 	}
 
-	data, err := b.client.doRequest(ctx, "POST", "/chat/completions", req)
+	data, err := b.client.doRequest(ctx, "POST", b.endpoint(), req)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +426,7 @@ func (b *ChatBuilder) StreamWithContext(ctx context.Context, handler func(ChatSt
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	body, err := b.client.doStreamRequest(ctx, "POST", "/chat/completions", req)
+	body, err := b.client.doStreamRequest(ctx, "POST", b.endpoint(), req)
 	if err != nil {
 		return err
 	}
@@ -367,4 +439,18 @@ func (b *ChatBuilder) StreamWithContext(ctx context.Context, handler func(ChatSt
 		}
 		return handler(chunk)
 	})
+}
+
+func (b *ChatBuilder) endpoint() string {
+	for _, message := range b.messages {
+		if message.Prefix {
+			return "/beta/chat/completions"
+		}
+	}
+	for _, tool := range b.tools {
+		if tool.Function.Strict {
+			return "/beta/chat/completions"
+		}
+	}
+	return "/chat/completions"
 }
