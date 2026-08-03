@@ -173,6 +173,13 @@ func (b *ChatBuilder) System(content string) *ChatBuilder {
 	return b
 }
 
+// SystemAppend appends an additional system message without replacing the
+// conversation's first system prompt.
+func (b *ChatBuilder) SystemAppend(content string) *ChatBuilder {
+	b.messages = append(b.messages, Message{Role: RoleSystem, Content: content})
+	return b
+}
+
 // User appends a user message to the conversation.
 func (b *ChatBuilder) User(content string) *ChatBuilder {
 	b.messages = append(b.messages, Message{Role: RoleUser, Content: content})

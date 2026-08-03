@@ -37,6 +37,22 @@ func TestChatBuilder_CustomSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestChatBuilder_SystemAppend(t *testing.T) {
+	req, err := ds4.New("key").Chat().System("Answer concisely.").SystemAppend("Use metric units.").User("How far is a marathon?").Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(req.Messages))
+	}
+	if req.Messages[0].Role != ds4.RoleSystem || req.Messages[0].Content != "Answer concisely." {
+		t.Errorf("unexpected first system message: %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != ds4.RoleSystem || req.Messages[1].Content != "Use metric units." {
+		t.Errorf("unexpected appended system message: %+v", req.Messages[1])
+	}
+}
+
 func TestChatBuilder_BuildBasic(t *testing.T) {
 	req, err := ds4.New("key").Chat().
 		System("You are helpful assistant.").

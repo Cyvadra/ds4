@@ -24,6 +24,16 @@ that prompt for an individual chat.
 client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"), "Answer concisely in Chinese.")
 ```
 
+Use `SystemAppend` when the API should receive an additional system message
+without replacing the first prompt:
+
+```go
+resp, err := client.Chat().
+    SystemAppend("Use metric units.").
+    User("How far is a marathon?").
+    Do()
+```
+
 ---
 
 ## Chat completions
