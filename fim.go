@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 )
 
 // FIMRequest is the JSON body sent to POST /beta/completions (Fill-In-the-Middle).
@@ -50,6 +51,35 @@ func (r *FIMResponse) FinishReason() string {
 		return ""
 	}
 	return r.Choices[0].FinishReason
+}
+
+// fimLocalRequest is the body sent to a local server's OpenAI-compatible
+// /completions endpoint for Fill-In-the-Middle. llama.cpp maps input_prefix
+// and input_suffix onto its native FIM support.
+type fimLocalRequest struct {
+	Model       string   `json:"model"`
+	InputPrefix string   `json:"input_prefix"`
+	InputSuffix string   `json:"input_suffix"`
+	MaxTokens   int      `json:"max_tokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	Stop        []string `json:"stop,omitempty"`
+	Stream      bool     `json:"stream,omitempty"`
+	Echo        bool     `json:"echo,omitempty"`
+}
+
+// toLocal converts a DeepSeek FIM request into a local-server request.
+func (r *FIMRequest) toLocal() *fimLocalRequest {
+	return &fimLocalRequest{
+		Model:       r.Model,
+		InputPrefix: r.Prompt,
+		InputSuffix: r.Suffix,
+		MaxTokens:   r.MaxTokens,
+		Temperature: r.Temperature,
+		TopP:        r.TopP,
+		Stop:        r.Stop,
+		Echo:        r.Echo,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -172,11 +202,32 @@ func (b *FIMBuilder) DoWithContext(ctx context.Context) (*FIMResponse, error) {
 		return nil, err
 	}
 
+	if b.client.isLocal() {
+		return b.doLocal(ctx, req)
+	}
+
 	data, err := b.client.doRequest(ctx, "POST", "/beta/completions", req)
 	if err != nil {
 		return nil, err
 	}
 
+	var resp FIMResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("ds4: unmarshal response: %w", err)
+	}
+	return &resp, nil
+}
+
+// doLocal sends a FIM request to a local server's OpenAI-compatible
+// /completions endpoint using input_prefix/input_suffix.
+func (b *FIMBuilder) doLocal(ctx context.Context, req *FIMRequest) (*FIMResponse, error) {
+	if !b.client.local.FIM {
+		return nil, fmt.Errorf("ds4: fim: local backend has FIM disabled (set LocalBackend.FIM)")
+	}
+	data, err := b.client.doRequest(ctx, "POST", "/completions", req.toLocal())
+	if err != nil {
+		return nil, err
+	}
 	var resp FIMResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("ds4: unmarshal response: %w", err)
@@ -196,14 +247,31 @@ func (b *FIMBuilder) StreamWithContext(ctx context.Context, handler func(FIMStre
 	if err != nil {
 		return err
 	}
-	req.Stream = true
 
+	if b.client.isLocal() {
+		if !b.client.local.FIM {
+			return fmt.Errorf("ds4: fim: local backend has FIM disabled (set LocalBackend.FIM)")
+		}
+		local := req.toLocal()
+		local.Stream = true
+		body, err := b.client.doStreamRequest(ctx, "POST", "/completions", local)
+		if err != nil {
+			return err
+		}
+		return streamFIM(body, handler)
+	}
+
+	req.Stream = true
 	body, err := b.client.doStreamRequest(ctx, "POST", "/beta/completions", req)
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	return streamFIM(body, handler)
+}
 
+// streamFIM reads an SSE body and dispatches each chunk to handler.
+func streamFIM(body io.ReadCloser, handler func(FIMStreamChunk) error) error {
+	defer body.Close()
 	return parseSSE(body, func(data []byte) error {
 		var chunk FIMStreamChunk
 		if err := json.Unmarshal(data, &chunk); err != nil {

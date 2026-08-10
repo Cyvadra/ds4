@@ -27,6 +27,9 @@ type Client struct {
 	httpClient   *http.Client
 	maxRetries   int
 	systemPrompt string
+	// local, when non-nil, targets a llama.cpp-compatible local server instead
+	// of the DeepSeek API and translates DeepSeek-private fields and endpoints.
+	local *LocalBackend
 }
 
 // New creates a new Client authenticated with apiKey. An optional defaultSystemPrompt
@@ -65,6 +68,43 @@ func (c *Client) WithBaseURL(url string) *Client {
 	c.baseURL = url
 	return c
 }
+
+// LocalBackend configures the client for a llama.cpp-compatible local server.
+//
+// llama.cpp exposes an OpenAI-compatible surface but lacks DeepSeek's private
+// /beta route, thinking parameters, and separated reasoning_content field.
+// With a local backend the client:
+//
+//   - never routes to /beta/... — strict tools and chat-prefix requests use the
+//     ordinary /chat/completions endpoint,
+//   - drops the thinking and reasoning_effort fields (local servers ignore
+//     them),
+//   - restores the reasoning/answer split on the client side from inline
+//     markers such as <reasoning>...</reasoning> (see DefaultReasoningMarkers
+//     and SplitReasoning),
+//   - maps Fill-In-the-Middle requests to the server's OpenAI-compatible
+//     /completions endpoint using input_prefix/input_suffix.
+type LocalBackend struct {
+	// FIM, when true, adapts FIMBuilder requests to the local server's
+	// /completions endpoint. Leave it false when the loaded model has no
+	// Fill-In-the-Middle support.
+	FIM bool
+}
+
+// WithLocalBackend switches the client to a llama.cpp-compatible local server
+// instead of the DeepSeek API. Point WithBaseURL at the server's
+// OpenAI-compatible prefix, for example http://localhost:8080/v1.
+//
+//	client := ds4.New("any-key").
+//	    WithBaseURL("http://localhost:8080/v1").
+//	    WithLocalBackend(ds4.LocalBackend{FIM: true})
+func (c *Client) WithLocalBackend(b LocalBackend) *Client {
+	c.local = &b
+	return c
+}
+
+// isLocal reports whether the client is configured for a local server.
+func (c *Client) isLocal() bool { return c.local != nil }
 
 // WithHTTPClient replaces the default net/http client. Avoid setting Timeout on
 // the supplied client: it also bounds streaming response reads.

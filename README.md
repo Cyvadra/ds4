@@ -203,6 +203,54 @@ err := client.FIM().
 
 ---
 
+## Local deployment (llama.cpp)
+
+The client can target a llama.cpp `llama-server` (or any OpenAI-compatible
+local server) instead of the DeepSeek API. Point `WithBaseURL` at the server's
+OpenAI-compatible prefix and enable the local backend:
+
+```go
+client := ds4.New("any-key"). // local servers usually ignore the API key
+    WithBaseURL("http://localhost:8080/v1").
+    WithLocalBackend(ds4.LocalBackend{FIM: true})
+
+resp, err := client.Chat().
+    Model("noip-2000:2b"). // must match a model (alias) loaded by llama-server
+    User("Explain goroutines.").
+    Do()
+```
+
+Local servers share the OpenAI surface, so most features work unchanged:
+
+- Chat, multi-round, streaming, JSON mode, logprobs, tools, retries and error
+  handling all map 1:1.
+- DeepSeek-private parameters (`thinking`, `reasoning_effort`, `user_id`) are
+  dropped; local servers ignore them anyway.
+- Strict tools and chat-prefix requests no longer route to `/beta/...` — they
+  use the ordinary chat endpoint. `Prefix`/`Continue` degrade to sending the
+  prefix as a normal assistant message.
+- Reasoning is **preserved on the consumer side**: when the local model emits
+  its chain-of-thought inline between markers (e.g. `<reasoning>...</reasoning>`
+  or ` think`/`/think`), the client restores `ReasoningContent()` and streams
+  reasoning deltas. See `SplitReasoning` and `DefaultReasoningMarkers` to
+  customise the marker set.
+- FIM is adapted to the local `/completions` endpoint using
+  `input_prefix`/`input_suffix`. Enable it with `LocalBackend{FIM: true}`;
+  calling `FIM()` without the flag returns an error. `Usage` cache fields are
+  left empty for local responses.
+
+`DefaultReasoningMarkers` and `SplitReasoning` are exported so you can match a
+non-standard model template:
+
+```go
+ds4.DefaultReasoningMarkers = []ds4.ReasoningMarker{
+    {Open: "<reasoning>", Close: "</reasoning>"},
+}
+reasoning, answer := ds4.SplitReasoning(raw)
+```
+
+---
+
 ## Builder options
 
 | Method | Description |
