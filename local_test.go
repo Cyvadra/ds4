@@ -459,6 +459,47 @@ func TestModelRouting_DiscoveryFailureIsIndependent(t *testing.T) {
 	}
 }
 
+func TestModelRouting_RetriesFailedLlamaCppDiscovery(t *testing.T) {
+	var localModels, localChats atomic.Int32
+	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer official.Close()
+
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			if localModels.Add(1) == 1 {
+				http.Error(w, "starting", http.StatusServiceUnavailable)
+				return
+			}
+			fmt.Fprint(w, `{"models":[{"name":"ds4","model":"ds4","capabilities":["completion"]}],"object":"list","data":[{"id":"model-file.gguf","aliases":["ds4"],"object":"model","owned_by":"llamacpp"}]}`)
+		case "/chat/completions":
+			localChats.Add(1)
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"local"}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer local.Close()
+
+	client := ds4.New("key").WithBaseURL(official.URL).WithLocalURL(local.URL)
+	if _, err := client.Chat().Model("ds4").User("hi").Do(); err == nil || !strings.Contains(err.Error(), `unknown model "ds4"`) {
+		t.Fatalf("first request error = %v, want discovery failure", err)
+	}
+	response, err := client.Chat().Model("ds4").User("hi").Do()
+	if err != nil {
+		t.Fatalf("retry request: %v", err)
+	}
+	if response.Content() != "local" || localModels.Load() != 2 || localChats.Load() != 1 {
+		t.Fatalf("response = %q, model calls = %d, chat calls = %d", response.Content(), localModels.Load(), localChats.Load())
+	}
+}
+
 func TestModelRouting_UnknownModelDoesNotSendCompletion(t *testing.T) {
 	var completions atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

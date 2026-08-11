@@ -140,8 +140,13 @@ func (c *Client) FIM() *FIMBuilder {
 
 type modelList struct {
 	Data []struct {
-		ID string `json:"id"`
+		ID      string   `json:"id"`
+		Aliases []string `json:"aliases"`
 	} `json:"data"`
+	Models []struct {
+		Name  string `json:"name"`
+		Model string `json:"model"`
+	} `json:"models"`
 }
 
 // Ping refreshes the official and local model lists. Discovery failures are
@@ -151,12 +156,22 @@ func (c *Client) Ping() error {
 }
 
 func (c *Client) resolveBackend(ctx context.Context, model string) (backend, error) {
+	c.modelsMu.Lock()
+	hadLoaded := c.modelsLoaded
+	c.modelsMu.Unlock()
 	c.refreshModels(ctx, false)
 
 	c.modelsMu.Lock()
 	kind, ok := c.models[model]
 	officialErr, localErr := c.officialErr, c.localErr
 	c.modelsMu.Unlock()
+	if !ok && hadLoaded && (officialErr != nil || localErr != nil) {
+		c.refreshModels(ctx, true)
+		c.modelsMu.Lock()
+		kind, ok = c.models[model]
+		officialErr, localErr = c.officialErr, c.localErr
+		c.modelsMu.Unlock()
+	}
 	if !ok {
 		if officialErr != nil || localErr != nil {
 			return backend{}, fmt.Errorf("ds4: unknown model %q (model discovery incomplete: %w)", model, errorsJoin(officialErr, localErr))
@@ -227,6 +242,20 @@ func (c *Client) loadModels(ctx context.Context, target backend, models map[stri
 	for _, model := range list.Data {
 		if model.ID != "" {
 			models[model.ID] = target.kind
+		}
+		for _, alias := range model.Aliases {
+			if alias != "" {
+				models[alias] = target.kind
+			}
+		}
+	}
+	for _, model := range list.Models {
+		name := model.Name
+		if name == "" {
+			name = model.Model
+		}
+		if name != "" {
+			models[name] = target.kind
 		}
 	}
 	return nil
