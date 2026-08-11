@@ -16,6 +16,18 @@ import "github.com/Cyvadra/ds4"
 client := ds4.New(os.Getenv("DEEPSEEK_API_KEY"))
 ```
 
+Add a local OpenAI-compatible server without creating a second client:
+
+```go
+client := ds4.New(os.Getenv("DEEPSEEK_API_KEY")).
+    WithLocalKey("").
+    WithLocalURL("http://localhost:8080/v1")
+```
+
+The first request loads `/models` from the official API and the local server,
+then keeps the routing map in memory. Later requests only need the model name.
+Call `client.Ping()` to check both servers and refresh the cached lists eagerly.
+
 New chats include the system prompt `You are a helpful assistant.`. Pass a
 second argument to `New` to set a client-specific default; `System` replaces
 that prompt for an individual chat.
@@ -205,19 +217,33 @@ err := client.FIM().
 
 ## Local deployment (llama.cpp)
 
-The client can target a llama.cpp `llama-server` (or any OpenAI-compatible
-local server) instead of the DeepSeek API. Point `WithBaseURL` at the server's
-OpenAI-compatible prefix and enable the local backend:
+The client can use the official DeepSeek API and a llama.cpp `llama-server`
+(or another OpenAI-compatible server) at the same time:
 
 ```go
-client := ds4.New("any-key"). // local servers usually ignore the API key
-    WithBaseURL("http://localhost:8080/v1").
-    WithLocalBackend(ds4.LocalBackend{FIM: true})
+client := ds4.New(os.Getenv("DEEPSEEK_API_KEY")).
+    WithLocalKey(""). // local servers usually do not require a key
+    WithLocalURL("http://localhost:8080/v1")
 
 resp, err := client.Chat().
-    Model("noip-2000:2b"). // must match a model (alias) loaded by llama-server
+    Model("noip-2000:2b").
     User("Explain goroutines.").
     Do()
+```
+
+On the first `Do` or `Stream`, the client loads the official model list first
+and the local list second. A local model therefore wins when both servers
+advertise the same ID. The resulting map remains cached for the lifetime of
+the client. Unknown model names fail before a completion request is sent.
+
+Model discovery failures are isolated: if one server is unavailable, models
+successfully discovered from the other server remain usable. `Ping()` always
+reloads both configured lists and returns any discovery errors:
+
+```go
+if err := client.Ping(); err != nil {
+    log.Printf("model discovery is incomplete: %v", err)
+}
 ```
 
 Local servers share the OpenAI surface, so most features work unchanged:
@@ -235,9 +261,9 @@ Local servers share the OpenAI surface, so most features work unchanged:
   reasoning deltas. See `SplitReasoning` and `DefaultReasoningMarkers` to
   customise the marker set.
 - FIM is adapted to the local `/completions` endpoint using
-  `input_prefix`/`input_suffix`. Enable it with `LocalBackend{FIM: true}`;
-  calling `FIM()` without the flag returns an error. `Usage` cache fields are
-  left empty for local responses.
+    `input_prefix`/`input_suffix`. Enable it with `WithLocalFIM(true)`; selecting
+    a local model for FIM without the flag returns an error. `Usage` cache fields
+    are left empty for local responses.
 
 `DefaultReasoningMarkers` and `SplitReasoning` are exported so you can match a
 non-standard model template:

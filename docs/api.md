@@ -6,10 +6,28 @@ Snapshot date: **2026-08-03**.
 
 - Base URL: `https://api.deepseek.com`
 - Chat endpoint: `POST /chat/completions`
+- Model discovery: `GET /models`
 - Authentication: `Authorization: Bearer <DEEPSEEK_API_KEY>`
 - Request media type: `application/json`
 - Streaming transport: server-sent events (SSE), terminated by
   `data: [DONE]`
+
+## Model discovery and routing
+
+`Client` may be configured with both the official API and a local
+OpenAI-compatible endpoint using `WithLocalKey` and `WithLocalURL`. Before the
+first completion request, the client loads `/models` from each configured
+backend. It loads official models first and local models second, so a duplicate
+model ID routes to the local endpoint.
+
+The routing map is retained in memory for the client lifetime. `Ping()` forces
+a refresh and reports discovery errors; without `Ping`, later requests do not
+repeat model discovery. A failure from one backend does not remove models
+successfully loaded from the other. A model absent from the resulting map is
+rejected before a completion request is sent.
+
+Each `/models` and completion request uses the key belonging to its selected
+backend. An empty local key omits the `Authorization` header.
 
 Minimal request:
 

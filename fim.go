@@ -201,12 +201,16 @@ func (b *FIMBuilder) DoWithContext(ctx context.Context) (*FIMResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	if b.client.isLocal() {
-		return b.doLocal(ctx, req)
+	target, err := b.client.resolveBackend(ctx, req.Model)
+	if err != nil {
+		return nil, err
 	}
 
-	data, err := b.client.doRequest(ctx, "POST", "/beta/completions", req)
+	if target.kind == backendLocal {
+		return b.doLocal(ctx, target, req)
+	}
+
+	data, err := b.client.doRequest(ctx, target, "POST", "/beta/completions", req)
 	if err != nil {
 		return nil, err
 	}
@@ -220,11 +224,11 @@ func (b *FIMBuilder) DoWithContext(ctx context.Context) (*FIMResponse, error) {
 
 // doLocal sends a FIM request to a local server's OpenAI-compatible
 // /completions endpoint using input_prefix/input_suffix.
-func (b *FIMBuilder) doLocal(ctx context.Context, req *FIMRequest) (*FIMResponse, error) {
-	if !b.client.local.FIM {
-		return nil, fmt.Errorf("ds4: fim: local backend has FIM disabled (set LocalBackend.FIM)")
+func (b *FIMBuilder) doLocal(ctx context.Context, target backend, req *FIMRequest) (*FIMResponse, error) {
+	if !b.client.localFIM {
+		return nil, fmt.Errorf("ds4: fim: local backend has FIM disabled (call WithLocalFIM(true))")
 	}
-	data, err := b.client.doRequest(ctx, "POST", "/completions", req.toLocal())
+	data, err := b.client.doRequest(ctx, target, "POST", "/completions", req.toLocal())
 	if err != nil {
 		return nil, err
 	}
@@ -247,14 +251,18 @@ func (b *FIMBuilder) StreamWithContext(ctx context.Context, handler func(FIMStre
 	if err != nil {
 		return err
 	}
+	target, err := b.client.resolveBackend(ctx, req.Model)
+	if err != nil {
+		return err
+	}
 
-	if b.client.isLocal() {
-		if !b.client.local.FIM {
-			return fmt.Errorf("ds4: fim: local backend has FIM disabled (set LocalBackend.FIM)")
+	if target.kind == backendLocal {
+		if !b.client.localFIM {
+			return fmt.Errorf("ds4: fim: local backend has FIM disabled (call WithLocalFIM(true))")
 		}
 		local := req.toLocal()
 		local.Stream = true
-		body, err := b.client.doStreamRequest(ctx, "POST", "/completions", local)
+		body, err := b.client.doStreamRequest(ctx, target, "POST", "/completions", local)
 		if err != nil {
 			return err
 		}
@@ -262,7 +270,7 @@ func (b *FIMBuilder) StreamWithContext(ctx context.Context, handler func(FIMStre
 	}
 
 	req.Stream = true
-	body, err := b.client.doStreamRequest(ctx, "POST", "/beta/completions", req)
+	body, err := b.client.doStreamRequest(ctx, target, "POST", "/beta/completions", req)
 	if err != nil {
 		return err
 	}

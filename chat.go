@@ -387,22 +387,18 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 	}
 
 	req := &ChatRequest{
-		Model:          b.model,
-		Messages:       b.messages,
-		MaxTokens:      b.maxTokens + b.continueTokens,
-		Temperature:    b.temperature,
-		TopP:           b.topP,
-		Stop:           b.stop,
-		ResponseFormat: b.responseFormat,
-		LogProbs:       b.logProbs,
-		TopLogProbs:    b.topLogProbs,
-		UserID:         b.userID,
-	}
-	if !b.client.isLocal() {
-		// Local servers have no thinking parameter; sending it would be a
-		// silent no-op, so keep the request clean.
-		req.Thinking = b.thinking
-		req.ReasoningEffort = b.reasoningEffort
+		Model:           b.model,
+		Messages:        b.messages,
+		MaxTokens:       b.maxTokens + b.continueTokens,
+		Temperature:     b.temperature,
+		TopP:            b.topP,
+		Stop:            b.stop,
+		ResponseFormat:  b.responseFormat,
+		LogProbs:        b.logProbs,
+		TopLogProbs:     b.topLogProbs,
+		UserID:          b.userID,
+		Thinking:        b.thinking,
+		ReasoningEffort: b.reasoningEffort,
 	}
 	if len(b.tools) > 0 {
 		req.Tools = b.tools
@@ -489,8 +485,16 @@ func (b *ChatBuilder) DoWithContext(ctx context.Context) (*ChatResponse, error) 
 	if err != nil {
 		return nil, err
 	}
+	target, err := b.client.resolveBackend(ctx, req.Model)
+	if err != nil {
+		return nil, err
+	}
+	if target.kind == backendLocal {
+		req.Thinking = nil
+		req.ReasoningEffort = ""
+	}
 
-	data, err := b.client.doRequest(ctx, "POST", b.endpoint(), req)
+	data, err := b.client.doRequest(ctx, target, "POST", b.endpoint(target), req)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +503,7 @@ func (b *ChatBuilder) DoWithContext(ctx context.Context) (*ChatResponse, error) 
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("ds4: unmarshal response: %w", err)
 	}
-	if b.client.isLocal() {
+	if target.kind == backendLocal {
 		// Local servers send reasoning inline in content; restore the split.
 		splitLocalReasoning(&resp)
 	}
@@ -518,12 +522,20 @@ func (b *ChatBuilder) StreamWithContext(ctx context.Context, handler func(ChatSt
 	if err != nil {
 		return err
 	}
+	target, err := b.client.resolveBackend(ctx, req.Model)
+	if err != nil {
+		return err
+	}
+	if target.kind == backendLocal {
+		req.Thinking = nil
+		req.ReasoningEffort = ""
+	}
 	req.Stream = true
 	if b.includeUsage {
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	body, err := b.client.doStreamRequest(ctx, "POST", b.endpoint(), req)
+	body, err := b.client.doStreamRequest(ctx, target, "POST", b.endpoint(target), req)
 	if err != nil {
 		return err
 	}
@@ -535,21 +547,21 @@ func (b *ChatBuilder) StreamWithContext(ctx context.Context, handler func(ChatSt
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return fmt.Errorf("ds4: unmarshal stream chunk: %w", err)
 		}
-		if b.client.isLocal() {
+		if target.kind == backendLocal {
 			splitters = applyReasoningSplit(&chunk, splitters)
 		}
 		return handler(chunk)
 	}); err != nil {
 		return err
 	}
-	if b.client.isLocal() {
+	if target.kind == backendLocal {
 		return flushReasoningSplit(splitters, handler)
 	}
 	return nil
 }
 
-func (b *ChatBuilder) endpoint() string {
-	if b.client.isLocal() {
+func (b *ChatBuilder) endpoint(target backend) string {
+	if target.kind == backendLocal {
 		// Local servers have no /beta route; strict tools and chat-prefix
 		// requests fall back to the ordinary chat endpoint.
 		return "/chat/completions"

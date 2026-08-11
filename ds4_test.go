@@ -13,6 +13,17 @@ import (
 	"github.com/Cyvadra/ds4"
 )
 
+func withOfficialModels(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}`)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Builder unit tests – no network required
 // ---------------------------------------------------------------------------
@@ -621,7 +632,7 @@ func TestAPIError_IsRetryable(t *testing.T) {
 
 func TestClient_RetriesRetryableStatus(t *testing.T) {
 	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&attempts, 1) == 1 {
 			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -644,7 +655,7 @@ func TestClient_RetriesRetryableStatus(t *testing.T) {
 
 func TestClient_DoesNotRetryClientError(t *testing.T) {
 	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attempts, 1)
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":{"message":"bad request"}}`))
@@ -661,7 +672,7 @@ func TestClient_DoesNotRetryClientError(t *testing.T) {
 }
 
 func TestClient_Chat_DecodesLogProbs(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if !req.LogProbs || req.TopLogProbs != 2 {
@@ -718,7 +729,7 @@ func chatFixture() ds4.ChatResponse {
 }
 
 func TestClient_Chat_MockServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -753,7 +764,7 @@ func TestClient_Chat_MockServer(t *testing.T) {
 }
 
 func TestClient_Chat_ErrorResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprintln(w, `{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`)
 	}))
@@ -777,7 +788,7 @@ func TestClient_Chat_ErrorResponse(t *testing.T) {
 }
 
 func TestClient_Chat_JSONMode(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.ResponseFormat == nil || req.ResponseFormat.Type != "json_object" {
@@ -796,7 +807,7 @@ func TestClient_Chat_JSONMode(t *testing.T) {
 }
 
 func TestClient_Chat_ThinkingMode(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if req.Model != ds4.ModelDeepSeekV4Flash {
@@ -828,7 +839,7 @@ func TestClient_Chat_ThinkingMode(t *testing.T) {
 }
 
 func TestClient_Chat_ToolCalls(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if len(req.Tools) == 0 {
@@ -876,7 +887,7 @@ func TestClient_Chat_ToolCalls(t *testing.T) {
 }
 
 func TestClient_Chat_Prefix(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/beta/chat/completions" {
 			t.Errorf("expected beta prefix endpoint, got %s", r.URL.Path)
 		}
@@ -913,7 +924,7 @@ func TestClient_Chat_Prefix(t *testing.T) {
 }
 
 func TestClient_Chat_Continue(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/beta/chat/completions" {
 			t.Errorf("expected beta continuation endpoint, got %s", r.URL.Path)
 		}
@@ -940,7 +951,7 @@ func TestClient_Chat_Continue(t *testing.T) {
 }
 
 func TestClient_Chat_StrictToolUsesBetaEndpoint(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/beta/chat/completions" {
 			t.Errorf("expected beta strict-tool endpoint, got %s", r.URL.Path)
 		}
@@ -971,7 +982,7 @@ func TestClient_Chat_Stream(t *testing.T) {
 		`data: [DONE]`,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.ChatRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if !req.Stream {
@@ -1002,7 +1013,7 @@ func TestClient_Chat_Stream(t *testing.T) {
 }
 
 func TestClient_Chat_StreamToolCallIndex(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"weather","arguments":"{\"city\":\""}},{"index":1,"id":"call_b","type":"function","function":{"name":"time","arguments":"{\"zone\":\""}}]},"finish_reason":null}]}`)
 		fmt.Fprintln(w, `data: [DONE]`)
@@ -1023,7 +1034,7 @@ func TestClient_Chat_StreamToolCallIndex(t *testing.T) {
 }
 
 func TestClient_Chat_StreamWithContext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)
 		fmt.Fprintln(w, `data: [DONE]`)
@@ -1048,7 +1059,7 @@ func TestClient_Chat_StreamWithContext(t *testing.T) {
 }
 
 func TestClient_Chat_Stream_HandlerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`)
 		fmt.Fprintln(w, `data: [DONE]`)
@@ -1066,7 +1077,7 @@ func TestClient_Chat_Stream_HandlerError(t *testing.T) {
 }
 
 func TestClient_FIM_MockServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/beta/completions" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -1112,7 +1123,7 @@ func TestClient_FIM_Stream(t *testing.T) {
 		`data: [DONE]`,
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		var req ds4.FIMRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if !req.Stream {

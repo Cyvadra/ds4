@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,12 +26,33 @@ const DefaultSystemPrompt = "You are a helpful assistant."
 type Client struct {
 	apiKey       string
 	baseURL      string
+	localKey     string
+	localURL     string
+	localFIM     bool
 	httpClient   *http.Client
 	maxRetries   int
 	systemPrompt string
-	// local, when non-nil, targets a llama.cpp-compatible local server instead
-	// of the DeepSeek API and translates DeepSeek-private fields and endpoints.
-	local *LocalBackend
+
+	modelsMu      sync.Mutex
+	modelsCond    *sync.Cond
+	modelsLoading bool
+	modelsLoaded  bool
+	models        map[string]backendKind
+	officialErr   error
+	localErr      error
+}
+
+type backendKind uint8
+
+const (
+	backendOfficial backendKind = iota
+	backendLocal
+)
+
+type backend struct {
+	kind    backendKind
+	baseURL string
+	apiKey  string
 }
 
 // New creates a new Client authenticated with apiKey. An optional defaultSystemPrompt
@@ -45,7 +68,7 @@ func New(apiKey string, defaultSystemPrompt ...string) *Client {
 	if len(defaultSystemPrompt) > 0 && defaultSystemPrompt[0] != "" {
 		systemPrompt = defaultSystemPrompt[0]
 	}
-	return &Client{
+	client := &Client{
 		apiKey:       apiKey,
 		baseURL:      DefaultBaseURL,
 		systemPrompt: systemPrompt,
@@ -61,50 +84,34 @@ func New(apiKey string, defaultSystemPrompt ...string) *Client {
 			},
 		},
 	}
+	client.modelsCond = sync.NewCond(&client.modelsMu)
+	return client
 }
 
 // WithBaseURL overrides the default API base URL (useful for proxies or testing).
 func (c *Client) WithBaseURL(url string) *Client {
-	c.baseURL = url
+	c.baseURL = strings.TrimRight(url, "/")
 	return c
 }
 
-// LocalBackend configures the client for a llama.cpp-compatible local server.
-//
-// llama.cpp exposes an OpenAI-compatible surface but lacks DeepSeek's private
-// /beta route, thinking parameters, and separated reasoning_content field.
-// With a local backend the client:
-//
-//   - never routes to /beta/... — strict tools and chat-prefix requests use the
-//     ordinary /chat/completions endpoint,
-//   - drops the thinking and reasoning_effort fields (local servers ignore
-//     them),
-//   - restores the reasoning/answer split on the client side from inline
-//     markers such as <reasoning>...</reasoning> (see DefaultReasoningMarkers
-//     and SplitReasoning),
-//   - maps Fill-In-the-Middle requests to the server's OpenAI-compatible
-//     /completions endpoint using input_prefix/input_suffix.
-type LocalBackend struct {
-	// FIM, when true, adapts FIMBuilder requests to the local server's
-	// /completions endpoint. Leave it false when the loaded model has no
-	// Fill-In-the-Middle support.
-	FIM bool
-}
-
-// WithLocalBackend switches the client to a llama.cpp-compatible local server
-// instead of the DeepSeek API. Point WithBaseURL at the server's
-// OpenAI-compatible prefix, for example http://localhost:8080/v1.
-//
-//	client := ds4.New("any-key").
-//	    WithBaseURL("http://localhost:8080/v1").
-//	    WithLocalBackend(ds4.LocalBackend{FIM: true})
-func (c *Client) WithLocalBackend(b LocalBackend) *Client {
-	c.local = &b
+// WithLocalKey sets the API key sent to the local OpenAI-compatible server.
+// An empty key is allowed for servers that do not require authentication.
+func (c *Client) WithLocalKey(key string) *Client {
+	c.localKey = key
 	return c
 }
 
-// isLocal reports whether the client is configured for a local server.
-func (c *Client) isLocal() bool { return c.local != nil }
+// WithLocalURL adds a local OpenAI-compatible server to model routing.
+func (c *Client) WithLocalURL(url string) *Client {
+	c.localURL = strings.TrimRight(url, "/")
+	return c
+}
+
+// WithLocalFIM enables adapting local FIM requests to /completions.
+func (c *Client) WithLocalFIM(enabled bool) *Client {
+	c.localFIM = enabled
+	return c
+}
 
 // WithHTTPClient replaces the default net/http client. Avoid setting Timeout on
 // the supplied client: it also bounds streaming response reads.
@@ -131,13 +138,127 @@ func (c *Client) FIM() *FIMBuilder {
 	return newFIMBuilder(c)
 }
 
+type modelList struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// Ping refreshes the official and local model lists. Discovery failures are
+// reported independently; models from a backend that succeeded remain usable.
+func (c *Client) Ping() error {
+	return c.refreshModels(context.Background(), true)
+}
+
+func (c *Client) resolveBackend(ctx context.Context, model string) (backend, error) {
+	c.refreshModels(ctx, false)
+
+	c.modelsMu.Lock()
+	kind, ok := c.models[model]
+	officialErr, localErr := c.officialErr, c.localErr
+	c.modelsMu.Unlock()
+	if !ok {
+		if officialErr != nil || localErr != nil {
+			return backend{}, fmt.Errorf("ds4: unknown model %q (model discovery incomplete: %w)", model, errorsJoin(officialErr, localErr))
+		}
+		return backend{}, fmt.Errorf("ds4: unknown model %q", model)
+	}
+	if kind == backendLocal {
+		return backend{kind: kind, baseURL: c.localURL, apiKey: c.localKey}, nil
+	}
+	return backend{kind: kind, baseURL: c.baseURL, apiKey: c.apiKey}, nil
+}
+
+func (c *Client) refreshModels(ctx context.Context, force bool) error {
+	c.modelsMu.Lock()
+	for c.modelsLoading {
+		c.modelsCond.Wait()
+	}
+	if c.modelsLoaded && !force {
+		c.modelsMu.Unlock()
+		return nil
+	}
+	c.modelsLoading = true
+	c.modelsMu.Unlock()
+
+	models := make(map[string]backendKind)
+	officialErr := c.loadModels(ctx, backend{kind: backendOfficial, baseURL: c.baseURL, apiKey: c.apiKey}, models)
+	var localErr error
+	if c.localURL != "" {
+		localErr = c.loadModels(ctx, backend{kind: backendLocal, baseURL: c.localURL, apiKey: c.localKey}, models)
+	}
+
+	c.modelsMu.Lock()
+	c.models = models
+	c.officialErr = officialErr
+	c.localErr = localErr
+	c.modelsLoaded = true
+	c.modelsLoading = false
+	c.modelsCond.Broadcast()
+	c.modelsMu.Unlock()
+	return errorsJoin(officialErr, localErr)
+}
+
+func (c *Client) loadModels(ctx context.Context, target backend, models map[string]backendKind) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.baseURL+"/models", nil)
+	if err != nil {
+		return fmt.Errorf("%s models: create request: %w", target.name(), err)
+	}
+	if target.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+target.apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s models: %w", target.name(), err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%s models: read response: %w", target.name(), err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s models: %w", target.name(), parseAPIError(resp.StatusCode, resp.Header, data))
+	}
+	var list modelList
+	if err := json.Unmarshal(data, &list); err != nil {
+		return fmt.Errorf("%s models: unmarshal response: %w", target.name(), err)
+	}
+	for _, model := range list.Data {
+		if model.ID != "" {
+			models[model.ID] = target.kind
+		}
+	}
+	return nil
+}
+
+func (b backend) name() string {
+	if b.kind == backendLocal {
+		return "local"
+	}
+	return "official"
+}
+
+func errorsJoin(officialErr, localErr error) error {
+	switch {
+	case officialErr != nil && localErr != nil:
+		return fmt.Errorf("official: %v; local: %w", officialErr, localErr)
+	case officialErr != nil:
+		return officialErr
+	default:
+		return localErr
+	}
+}
+
 // send builds and dispatches a single HTTP attempt.
-func (c *Client) send(ctx context.Context, method, path string, data []byte, accept string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(data))
+func (c *Client) send(ctx context.Context, target backend, method, path string, data []byte, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, target.baseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("ds4: create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if target.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+target.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
 
@@ -150,14 +271,14 @@ func (c *Client) send(ctx context.Context, method, path string, data []byte, acc
 
 // doRequest marshals body as JSON, sends a POST to path, and returns the raw
 // response bytes on success (HTTP 200). Any non-200 status is converted to *APIError.
-func (c *Client) doRequest(ctx context.Context, method, path string, body any) ([]byte, error) {
+func (c *Client) doRequest(ctx context.Context, target backend, method, path string, body any) ([]byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("ds4: marshal request: %w", err)
 	}
 
 	for attempt := 0; ; attempt++ {
-		resp, err := c.send(ctx, method, path, data, "application/json")
+		resp, err := c.send(ctx, target, method, path, data, "application/json")
 		if err != nil {
 			return nil, err
 		}
@@ -183,14 +304,14 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 
 // doStreamRequest is like doRequest but leaves the response body open for
 // SSE reading. The caller must close the returned ReadCloser.
-func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any) (io.ReadCloser, error) {
+func (c *Client) doStreamRequest(ctx context.Context, target backend, method, path string, body any) (io.ReadCloser, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("ds4: marshal request: %w", err)
 	}
 
 	for attempt := 0; ; attempt++ {
-		resp, err := c.send(ctx, method, path, data, "text/event-stream")
+		resp, err := c.send(ctx, target, method, path, data, "text/event-stream")
 		if err != nil {
 			return nil, err
 		}

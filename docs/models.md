@@ -18,6 +18,15 @@ callers to change the model ID.
 Both models use the OpenAI-format base URL `https://api.deepseek.com` and
 support thinking and non-thinking modes. Thinking is enabled by default.
 
+## Client-side model routing
+
+When an official API and local endpoint are configured together, ds4 discovers
+their model IDs through `GET /models` and caches an in-memory map. Official
+models are inserted first and local models second, making a duplicate ID local
+by default. `.Model(name)` uses this map to select the endpoint; unknown names
+are rejected before sending a completion request. Call `Client.Ping()` to
+refresh the lists explicitly.
+
 ## Capacity and feature matrix
 
 | Capability | V4 Flash | V4 Pro |

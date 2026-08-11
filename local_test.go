@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cyvadra/ds4"
 )
@@ -92,6 +95,10 @@ func TestSplitReasoning(t *testing.T) {
 
 func TestLocal_Chat_UsesChatEndpointAndDropsThinking(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("local chat must use /chat/completions, got %s", r.URL.Path)
 		}
@@ -131,10 +138,12 @@ func TestLocal_Chat_UsesChatEndpointAndDropsThinking(t *testing.T) {
 
 	client := ds4.New("key").
 		WithBaseURL(srv.URL).
-		WithLocalBackend(ds4.LocalBackend{FIM: true})
+		WithLocalURL(srv.URL).
+		WithLocalFIM(true)
 
 	tool := ds4.NewStrictFunction("get_weather", "Get weather", map[string]any{"type": "object"})
 	resp, err := client.Chat().
+		Model("local-model").
 		ThinkingMode().
 		ReasoningEffort(ds4.EffortMax).
 		User("2+2?").
@@ -161,6 +170,10 @@ func TestLocal_Chat_Stream_SplitsReasoning(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, line := range sseLines {
 			fmt.Fprintln(w, line)
@@ -168,9 +181,9 @@ func TestLocal_Chat_Stream_SplitsReasoning(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalBackend(ds4.LocalBackend{})
+	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalURL(srv.URL)
 	var reasoning, content strings.Builder
-	err := client.Chat().User("2+2?").Stream(func(chunk ds4.ChatStreamChunk) error {
+	err := client.Chat().Model("local-model").User("2+2?").Stream(func(chunk ds4.ChatStreamChunk) error {
 		if len(chunk.Choices) == 0 {
 			return nil
 		}
@@ -191,15 +204,19 @@ func TestLocal_Chat_Stream_SplitsReasoning(t *testing.T) {
 
 func TestLocal_Chat_Stream_WithoutMarkersPassesThrough(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":"stop"}]}`)
 		fmt.Fprintln(w, `data: [DONE]`)
 	}))
 	defer srv.Close()
 
-	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalBackend(ds4.LocalBackend{})
+	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalURL(srv.URL)
 	var content strings.Builder
-	err := client.Chat().User("Hi").Stream(func(chunk ds4.ChatStreamChunk) error {
+	err := client.Chat().Model("local-model").User("Hi").Stream(func(chunk ds4.ChatStreamChunk) error {
 		if len(chunk.Choices) == 0 {
 			return nil
 		}
@@ -231,6 +248,10 @@ type localFIMRequest struct {
 
 func TestLocal_FIM(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
 		if r.URL.Path != "/completions" {
 			t.Errorf("local FIM must use /completions, got %s", r.URL.Path)
 		}
@@ -267,9 +288,11 @@ func TestLocal_FIM(t *testing.T) {
 
 	client := ds4.New("key").
 		WithBaseURL(srv.URL).
-		WithLocalBackend(ds4.LocalBackend{FIM: true})
+		WithLocalURL(srv.URL).
+		WithLocalFIM(true)
 
 	resp, err := client.FIM().
+		Model("local-model").
 		Prompt("func main() {\n    ").
 		Suffix("\n}").
 		MaxTokens(64).
@@ -286,10 +309,14 @@ func TestLocal_FIM(t *testing.T) {
 }
 
 func TestLocal_FIM_RequiresEnabledFlag(t *testing.T) {
-	client := ds4.New("key").WithBaseURL("http://localhost:8080/v1").WithLocalBackend(ds4.LocalBackend{})
-	_, err := client.FIM().Prompt("p").Do()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+	}))
+	defer srv.Close()
+	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalURL(srv.URL)
+	_, err := client.FIM().Model("local-model").Prompt("p").Do()
 	if err == nil {
-		t.Fatal("expected error when LocalBackend.FIM is disabled")
+		t.Fatal("expected error when WithLocalFIM is disabled")
 	}
 	if !strings.Contains(err.Error(), "FIM") {
 		t.Errorf("expected error mentioning FIM, got %v", err)
@@ -304,6 +331,10 @@ func TestLocal_FIM_Stream(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
 		if r.URL.Path != "/completions" {
 			t.Errorf("local FIM must use /completions, got %s", r.URL.Path)
 		}
@@ -321,9 +352,9 @@ func TestLocal_FIM_Stream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalBackend(ds4.LocalBackend{FIM: true})
+	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalURL(srv.URL).WithLocalFIM(true)
 	var result strings.Builder
-	err := client.FIM().Prompt("func main() {\n    ").Stream(func(chunk ds4.FIMStreamChunk) error {
+	err := client.FIM().Model("local-model").Prompt("func main() {\n    ").Stream(func(chunk ds4.FIMStreamChunk) error {
 		if len(chunk.Choices) > 0 {
 			result.WriteString(chunk.Choices[0].Text)
 		}
@@ -334,5 +365,155 @@ func TestLocal_FIM_Stream(t *testing.T) {
 	}
 	if result.String() != `fmt.Println("hi")` {
 		t.Errorf("streamed text = %q", result.String())
+	}
+}
+
+func TestModelRouting_LocalOverridesOfficialAndCaches(t *testing.T) {
+	var officialModels, localModels, officialChats, localChats atomic.Int32
+	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			officialModels.Add(1)
+			if got := r.Header.Get("Authorization"); got != "Bearer official-key" {
+				t.Errorf("official Authorization = %q", got)
+			}
+			fmt.Fprint(w, `{"data":[{"id":"shared"},{"id":"official-only"}]}`)
+		case "/chat/completions":
+			officialChats.Add(1)
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"official"}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer official.Close()
+
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			localModels.Add(1)
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("local Authorization = %q, want empty", got)
+			}
+			fmt.Fprint(w, `{"data":[{"id":"shared"},{"id":"local-only"}]}`)
+		case "/chat/completions":
+			localChats.Add(1)
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"local"}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer local.Close()
+
+	client := ds4.New("official-key").WithBaseURL(official.URL).WithLocalKey("").WithLocalURL(local.URL)
+	resp, err := client.Chat().Model("shared").User("hi").Do()
+	if err != nil {
+		t.Fatalf("shared model: %v", err)
+	}
+	if resp.Content() != "local" {
+		t.Fatalf("shared response = %q", resp.Content())
+	}
+	if _, err := client.Chat().Model("official-only").User("hi").Do(); err != nil {
+		t.Fatalf("official model: %v", err)
+	}
+	if officialModels.Load() != 1 || localModels.Load() != 1 {
+		t.Fatalf("model calls = official %d, local %d", officialModels.Load(), localModels.Load())
+	}
+	if officialChats.Load() != 1 || localChats.Load() != 1 {
+		t.Fatalf("chat calls = official %d, local %d", officialChats.Load(), localChats.Load())
+	}
+
+	if err := client.Ping(); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if officialModels.Load() != 2 || localModels.Load() != 2 {
+		t.Fatalf("model calls after Ping = official %d, local %d", officialModels.Load(), localModels.Load())
+	}
+}
+
+func TestModelRouting_DiscoveryFailureIsIndependent(t *testing.T) {
+	var officialChats atomic.Int32
+	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"official-model"}]}`)
+			return
+		}
+		officialChats.Add(1)
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer official.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "offline", http.StatusServiceUnavailable)
+	}))
+	defer local.Close()
+
+	client := ds4.New("key").WithBaseURL(official.URL).WithLocalURL(local.URL)
+	resp, err := client.Chat().Model("official-model").User("hi").Do()
+	if err != nil {
+		t.Fatalf("successful backend should remain usable: %v", err)
+	}
+	if resp.Content() != "ok" || officialChats.Load() != 1 {
+		t.Fatalf("response = %q, chats = %d", resp.Content(), officialChats.Load())
+	}
+	if err := client.Ping(); err == nil || !strings.Contains(err.Error(), "local") {
+		t.Fatalf("Ping error = %v, want local discovery error", err)
+	}
+}
+
+func TestModelRouting_UnknownModelDoesNotSendCompletion(t *testing.T) {
+	var completions atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"known"}]}`)
+			return
+		}
+		completions.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := ds4.New("key").WithBaseURL(srv.URL).Chat().Model("unknown").User("hi").Do()
+	if err == nil || !strings.Contains(err.Error(), `unknown model "unknown"`) {
+		t.Fatalf("error = %v", err)
+	}
+	if completions.Load() != 0 {
+		t.Fatalf("completion calls = %d, want 0", completions.Load())
+	}
+}
+
+func TestModelRouting_ConcurrentFirstRequestsShareDiscovery(t *testing.T) {
+	var models, completions atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			models.Add(1)
+			time.Sleep(25 * time.Millisecond)
+			fmt.Fprint(w, `{"data":[{"id":"model"}]}`)
+			return
+		}
+		completions.Add(1)
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL)
+	const requests = 20
+	var waitGroup sync.WaitGroup
+	errors := make(chan error, requests)
+	for request := 0; request < requests; request++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			_, err := client.Chat().Model("model").User("hi").Do()
+			errors <- err
+		}()
+	}
+	waitGroup.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+	}
+	if models.Load() != 1 || completions.Load() != requests {
+		t.Fatalf("calls = models %d, completions %d", models.Load(), completions.Load())
 	}
 }
