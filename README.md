@@ -354,3 +354,33 @@ completion, and FIM. It skips when `DEEPSEEK_API_KEY` is absent.
 ```sh
 DEEPSEEK_API_KEY=your_key go test -run '^TestIntegration_AllFeatures$' -v
 ```
+
+## Live deployment checker
+
+`ds4check` is a configurable, billable verification tool for a real API
+deployment. It does not read or persist credentials. Supply values as flags or
+environment variables, then select the model explicitly:
+
+```sh
+go run ./cmd/ds4check \
+    -api-key "$DEEPSEEK_API_KEY" \
+    -model deepseek-v4-flash \
+    -tests all
+```
+
+The default checks are `models,chat,json,stream,tools`; add `thinking`,
+`prefix`, and `fim`, or use `all`, to test the beta and reasoning features.
+Each check prints `PASS` or `FAIL`, and the command returns a non-zero status
+when any selected check fails. `-timeout` sets the timeout per check and
+`-retries` sets retries for transient API failures.
+
+To test an OpenAI-compatible local server, provide its URL and a model it
+advertises. `DS4_LOCAL_URL`, `DS4_LOCAL_KEY`, and `DS4_MODEL` are environment
+variable equivalents for the related flags:
+
+```sh
+go run ./cmd/ds4check \
+    -local-url http://localhost:8080/v1 \
+    -model noip-2000:2b \
+    -tests models,chat,json,stream,tools,fim
+```
