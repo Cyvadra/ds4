@@ -231,6 +231,9 @@ func splitLocalReasoning(resp *ChatResponse) {
 func applyReasoningSplit(chunk *ChatStreamChunk, splitters []*reasoningSplitter) []*reasoningSplitter {
 	for i := range chunk.Choices {
 		choice := &chunk.Choices[i]
+		if choice.Delta.ReasoningContent != "" {
+			continue
+		}
 		for len(splitters) <= choice.Index {
 			splitters = append(splitters, newReasoningSplitter())
 		}

@@ -193,6 +193,26 @@ func checkThinking(ctx context.Context, client *ds4.Client, model string) (strin
 	if response.ReasoningContent() == "" {
 		return output, fmt.Errorf("expected reasoning content, got none")
 	}
+
+	var streamedReasoning, streamedContent strings.Builder
+	err = client.Chat().Model(model).ThinkingMode().ReasoningEffort(ds4.EffortLow).User("What is 17 + 25? Give only the number in the final answer.").MaxTokens(128).StreamWithContext(ctx, func(chunk ds4.ChatStreamChunk) error {
+		for _, choice := range chunk.Choices {
+			streamedReasoning.WriteString(choice.Delta.ReasoningContent)
+			streamedContent.WriteString(choice.Delta.Content)
+		}
+		return nil
+	})
+	streamOutput := fmt.Sprintf("stream reasoning: %s\nstream content: %s", streamedReasoning.String(), streamedContent.String())
+	if err != nil {
+		return output + "\n" + streamOutput, err
+	}
+	if streamedReasoning.Len() == 0 {
+		return output + "\n" + streamOutput, fmt.Errorf("expected streamed reasoning content, got none")
+	}
+	if !strings.Contains(streamedContent.String(), "42") {
+		return output + "\n" + streamOutput, fmt.Errorf("expected streamed answer 42, got %q", streamedContent.String())
+	}
+	output += "\n" + streamOutput
 	return output, nil
 }
 

@@ -202,6 +202,47 @@ func TestLocal_Chat_Stream_SplitsReasoning(t *testing.T) {
 	}
 }
 
+func TestLocal_Chat_Stream_PreservesNativeReasoning(t *testing.T) {
+	sseLines := []string{
+		`data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}`,
+		`data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_content":"Let me compute"},"finish_reason":null}]}`,
+		`data: {"id":"1","choices":[{"index":0,"delta":{"content":"The answer is 42"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			fmt.Fprint(w, `{"data":[{"id":"local-model"}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, line := range sseLines {
+			fmt.Fprintln(w, line)
+		}
+	}))
+	defer srv.Close()
+
+	client := ds4.New("key").WithBaseURL(srv.URL).WithLocalURL(srv.URL)
+	var reasoning, content strings.Builder
+	err := client.Chat().Model("local-model").User("2+2?").Stream(func(chunk ds4.ChatStreamChunk) error {
+		if len(chunk.Choices) == 0 {
+			return nil
+		}
+		reasoning.WriteString(chunk.Choices[0].Delta.ReasoningContent)
+		content.WriteString(chunk.Choices[0].Delta.Content)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reasoning.String() != "Let me compute" {
+		t.Errorf("streamed reasoning = %q", reasoning.String())
+	}
+	if content.String() != "The answer is 42" {
+		t.Errorf("streamed content = %q", content.String())
+	}
+}
+
 func TestLocal_Chat_Stream_WithoutMarkersPassesThrough(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {
