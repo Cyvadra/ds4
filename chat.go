@@ -2,9 +2,11 @@ package ds4
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 )
 
 // ChatRequest is the JSON body sent to POST /chat/completions.
@@ -146,7 +148,23 @@ type ChatBuilder struct {
 	topLogProbs     int
 	includeUsage    bool
 	userID          string
+	images          []imageAttachment
 }
+
+type imageAttachment struct {
+	url        string
+	data       []byte
+	mediaType  string
+	detail     string
+	detailArgs int
+}
+
+const (
+	maxInlineImageBytes = 32 << 20
+	maxImagesPerRequest = 600
+	maxImageURLLength   = 8192
+	maxRequestBodyBytes = 48 << 20
+)
 
 func newChatBuilder(c *Client) *ChatBuilder {
 	return &ChatBuilder{
@@ -186,6 +204,69 @@ func (b *ChatBuilder) SystemAppend(content string) *ChatBuilder {
 func (b *ChatBuilder) User(content string) *ChatBuilder {
 	b.messages = append(b.messages, Message{Role: RoleUser, Content: content})
 	return b
+}
+
+// WithImageURL attaches a publicly accessible HTTP(S) image URL to this
+// request. The image is sent with the final user message when Build, Do, or
+// Stream is called, regardless of where this method appears in the chain. Each
+// call appends another image, so URL and Base64 images may be freely mixed.
+//
+// detail is optional and may be ImageDetailLow, ImageDetailHigh,
+// ImageDetailOriginal, or ImageDetailAuto. Omitting it uses the API default.
+// ImageDetailLow scales the image to 512x512 before inference for lower
+// latency and token usage; choose original/high for OCR or fine detail.
+//
+// Adding an image automatically selects ModelDeepSeekV4FlashVisionExp, even
+// when Model was called with a different model. Build returns an error unless
+// the conversation has a user message, and validates the URL and detail value.
+//
+//	resp, err := client.Chat().
+//	    User("Describe this image.").
+//	    WithImageURL("https://example.com/photo.jpg", ds4.ImageDetailLow).
+//	    Do()
+func (b *ChatBuilder) WithImageURL(rawURL string, detail ...string) *ChatBuilder {
+	b.images = append(b.images, imageAttachment{
+		url:        rawURL,
+		detail:     optionalImageDetail(detail),
+		detailArgs: len(detail),
+	})
+	return b
+}
+
+// WithImageBase64 attaches raw image bytes to this request as a Base64 data
+// URL. mediaType must be image/jpeg, image/png, image/gif, or image/webp; the
+// package performs Base64 encoding during Build. The image is sent with the
+// final user message regardless of this method's position in the chain.
+//
+// Repeated calls support multiple images and may be mixed with WithImageURL.
+// detail is optional and accepts the ImageDetail constants; omit it to use the
+// API default. Adding an image automatically switches the request model to
+// ModelDeepSeekV4FlashVisionExp. Build validates the image, MIME type, detail,
+// and the DeepSeek 32 MiB per-inline-image and 600-image request limits.
+//
+//	data, err := os.ReadFile("screenshot.png")
+//	if err != nil { return err }
+//	resp, err := client.Chat().
+//	    User("Read the text in this screenshot.").
+//	    WithImageBase64(data, "image/png", ds4.ImageDetailOriginal).
+//	    Do()
+func (b *ChatBuilder) WithImageBase64(data []byte, mediaType string, detail ...string) *ChatBuilder {
+	imageData := make([]byte, len(data))
+	copy(imageData, data)
+	b.images = append(b.images, imageAttachment{
+		data:       imageData,
+		mediaType:  mediaType,
+		detail:     optionalImageDetail(detail),
+		detailArgs: len(detail),
+	})
+	return b
+}
+
+func optionalImageDetail(details []string) string {
+	if len(details) == 0 {
+		return ""
+	}
+	return details[0]
 }
 
 // Assistant appends an assistant message. Use this when building multi-round
@@ -369,10 +450,16 @@ func (b *ChatBuilder) Clone() *ChatBuilder {
 	copy(msgs, b.messages)
 	tools := make([]Tool, len(b.tools))
 	copy(tools, b.tools)
+	images := make([]imageAttachment, len(b.images))
+	for index, image := range b.images {
+		images[index] = image
+		images[index].data = append([]byte(nil), image.data...)
+	}
 
 	cp := *b
 	cp.messages = msgs
 	cp.tools = tools
+	cp.images = images
 	return &cp
 }
 
@@ -386,9 +473,26 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 		return nil, err
 	}
 
+	messages := append([]Message(nil), b.messages...)
+	model := b.model
+	if len(b.images) > 0 {
+		finalUser := -1
+		for index := len(messages) - 1; index >= 0; index-- {
+			if messages[index].Role == RoleUser {
+				finalUser = index
+				break
+			}
+		}
+		if finalUser == -1 {
+			return nil, fmt.Errorf("ds4: chat: image attachments require a user message")
+		}
+		messages[finalUser].imageInputs = makeImageInputs(b.images)
+		model = ModelDeepSeekV4FlashVisionExp
+	}
+
 	req := &ChatRequest{
-		Model:           b.model,
-		Messages:        b.messages,
+		Model:           model,
+		Messages:        messages,
 		MaxTokens:       b.maxTokens + b.continueTokens,
 		Temperature:     b.temperature,
 		TopP:            b.topP,
@@ -404,6 +508,15 @@ func (b *ChatBuilder) Build() (*ChatRequest, error) {
 		req.Tools = b.tools
 		if b.toolChoice != nil {
 			req.ToolChoice = b.toolChoice
+		}
+	}
+	if len(b.images) > 0 {
+		body, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("ds4: chat: marshal image request: %w", err)
+		}
+		if len(body) > maxRequestBodyBytes {
+			return nil, fmt.Errorf("ds4: chat: image request body must not exceed 48 MiB")
 		}
 	}
 	return req, nil
@@ -447,7 +560,74 @@ func validateChatRequest(b *ChatBuilder) error {
 	if b.topLogProbs < 0 || b.topLogProbs > 20 {
 		return fmt.Errorf("ds4: chat: LogProbs topN must be between 0 and 20")
 	}
+	if err := validateImageAttachments(b.images); err != nil {
+		return err
+	}
 	return validateUserID(b.userID)
+}
+
+func validateImageAttachments(images []imageAttachment) error {
+	if len(images) > maxImagesPerRequest {
+		return fmt.Errorf("ds4: chat: at most %d images may be attached to one request", maxImagesPerRequest)
+	}
+	for _, image := range images {
+		if image.detailArgs > 1 {
+			return fmt.Errorf("ds4: chat: image detail accepts at most one value")
+		}
+		if image.detail != "" && !validImageDetail(image.detail) {
+			return fmt.Errorf("ds4: chat: image detail must be low, high, original, or auto")
+		}
+		if image.url != "" {
+			if len(image.url) > maxImageURLLength {
+				return fmt.Errorf("ds4: chat: image URL must not exceed 8192 characters")
+			}
+			parsed, err := url.ParseRequestURI(image.url)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return fmt.Errorf("ds4: chat: image URL must be an absolute http or https URL")
+			}
+			continue
+		}
+		if len(image.data) == 0 {
+			return fmt.Errorf("ds4: chat: image data must not be empty")
+		}
+		if len(image.data) > maxInlineImageBytes {
+			return fmt.Errorf("ds4: chat: inline image must not exceed 32 MiB")
+		}
+		if !validImageMediaType(image.mediaType) {
+			return fmt.Errorf("ds4: chat: image media type must be image/jpeg, image/png, image/gif, or image/webp")
+		}
+	}
+	return nil
+}
+
+func validImageDetail(detail string) bool {
+	switch detail {
+	case ImageDetailLow, ImageDetailHigh, ImageDetailOriginal, ImageDetailAuto:
+		return true
+	default:
+		return false
+	}
+}
+
+func validImageMediaType(mediaType string) bool {
+	switch mediaType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func makeImageInputs(images []imageAttachment) []imageInput {
+	inputs := make([]imageInput, 0, len(images))
+	for _, image := range images {
+		imageURL := image.url
+		if imageURL == "" {
+			imageURL = "data:" + image.mediaType + ";base64," + base64.StdEncoding.EncodeToString(image.data)
+		}
+		inputs = append(inputs, imageInput{URL: imageURL, Detail: image.detail})
+	}
+	return inputs
 }
 
 func validateUserID(id string) error {

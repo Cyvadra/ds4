@@ -49,7 +49,7 @@ resp, err := client.Chat().
 | Client | `WithHTTPClient(client)` | built-in `net/http` client | Replaces the HTTP transport; avoid a client-wide timeout because it limits streams. |
 | Client | `WithRetry(n)` | `0` | Retries retryable 429, 500, and 503 responses up to `n` additional times. |
 | Chat | `System(content)`, `SystemAppend(content)`, `User(content)`, `Assistant(content)`, `ToolResult(id, content)`, `AddMessage(message)`, `WithMessages(messages)` | one default system message | Composes or replaces the conversation history. |
-| Chat and FIM | `Model(name)` | `deepseek-v4-flash` | Selects an advertised model. Official constants: `ModelDeepSeekV4Flash`, `ModelDeepSeekV4Pro`. |
+| Chat and FIM | `Model(name)` | `deepseek-v4-flash` | Selects an advertised model. Official constants: `ModelDeepSeekV4Flash`, `ModelDeepSeekV4Pro`, `ModelDeepSeekV4FlashVisionExp`. |
 | Chat and FIM | `MaxTokens(n)` | API default | Limits generated tokens. FIM accepts `0` through `4096`. |
 | Chat and FIM | `Temperature(t)` | API default | Sets sampling temperature from `0` through `2`; ignored while thinking is enabled. |
 | Chat and FIM | `TopP(p)` | API default | Sets nucleus sampling from `0` through `1`; ignored while thinking is enabled. |
@@ -61,12 +61,71 @@ resp, err := client.Chat().
 | Chat | `Tool(tool)`, `WithTools(tools)`, `ToolChoice(choice)` | no tools | Adds or replaces function tools and optionally selects one. |
 | Chat | `IncludeStreamUsage()` | disabled | Includes token usage in the final streaming chunk. |
 | Chat | `UserID(id)` | empty | Tags a request for cache isolation and safety review; do not use personal information. |
+| Chat | `WithImageURL(url, detail...)` | none | Attaches an HTTP(S) image URL to the final user message and automatically uses the vision model. |
+| Chat | `WithImageBase64(data, mediaType, detail...)` | none | Encodes raw JPEG, PNG, GIF, or WebP bytes as an image attachment and automatically uses the vision model. |
 | FIM | `Prompt(text)` / `Suffix(text)` | prompt required; no suffix | Sets the text before and after the insertion point. |
 | FIM | `Echo()` | disabled | Includes the prompt in the response text. |
 | `ds4check` | `-api-key`, `-base-url`, `-local-url`, `-local-key`, `-model` | environment equivalents or empty | Selects the deployment and an explicitly named model. Environment equivalents are `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DS4_LOCAL_URL`, `DS4_LOCAL_KEY`, and `DS4_MODEL`. |
 | `ds4check` | `-tests`, `-timeout`, `-retries` | `models,chat,json,stream,tools`; `3m`; `1` | Selects checks, sets a per-check deadline, and retries transient API failures. |
 
 ## Chat completions
+
+### Image understanding
+
+`WithImageURL` and `WithImageBase64` add images to the current request. They
+may appear anywhere in the fluent chain: when the request is built, ds4 adds
+all attached images to the final `User` message and switches the model to
+`ModelDeepSeekV4FlashVisionExp`. This model choice overrides an earlier
+`Model(...)` call. A request with images must contain at least one user message.
+
+Attach a public image URL:
+
+```go
+resp, err := client.Chat().
+    WithImageURL("https://example.com/chart.png", ds4.ImageDetailOriginal).
+    User("Summarize this chart and list the largest changes.").
+    Do()
+if err != nil {
+    return err
+}
+fmt.Println(resp.Content())
+```
+
+For local images, pass raw bytes and one of `image/jpeg`, `image/png`,
+`image/gif`, or `image/webp`. ds4 creates the required Base64 data URL.
+
+```go
+image, err := os.ReadFile("screenshot.png")
+if err != nil {
+    return err
+}
+resp, err := client.Chat().
+    User("Read the visible error and suggest a fix.").
+    WithImageBase64(image, "image/png", ds4.ImageDetailOriginal).
+    Do()
+```
+
+Calls append images, so URL and Base64 input can be mixed in one request:
+
+```go
+resp, err := client.Chat().
+    User("Compare these two interfaces for accessibility.").
+    WithImageURL("https://example.com/before.png", ds4.ImageDetailLow).
+    WithImageBase64(after, "image/png", ds4.ImageDetailOriginal).
+    Do()
+```
+
+The optional detail argument accepts `ImageDetailLow`, `ImageDetailHigh`,
+`ImageDetailOriginal`, or `ImageDetailAuto`. `ImageDetailLow` downscales to
+512x512 before inference and is useful for inexpensive general inspection;
+`ImageDetailOriginal` and `ImageDetailHigh` preserve detail for OCR and charts.
+Omit detail to use the API default.
+
+DeepSeek accepts JPEG, PNG, GIF, and WebP. ds4 validates up to 600 images per
+request and the 32 MiB maximum for each inline Base64 image. HTTP(S) URLs are
+also limited by DeepSeek to 8192 characters, a 32 MiB image download, and a
+60-second download window. The full HTTP body must be at most 48 MiB; use the
+official Files API directly for images larger than 32 MiB or for reusable files.
 
 ### Multi-round conversations
 

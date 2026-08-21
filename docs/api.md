@@ -40,11 +40,47 @@ Minimal request:
 }
 ```
 
-The documented V4 model values are `deepseek-v4-flash` and
-`deepseek-v4-pro`. Important optional Chat fields include `thinking`,
+The documented V4 model values are `deepseek-v4-flash`, `deepseek-v4-pro`, and
+`deepseek-v4-flash-vision-exp`. Important optional Chat fields include `thinking`,
 `reasoning_effort`, `max_tokens`, `response_format`, `stop`, `stream`,
 `stream_options`, `temperature`, `top_p`, `tools`, `tool_choice`, `logprobs`,
 and `top_logprobs`.
+
+## Image understanding
+
+The vision model is `deepseek-v4-flash-vision-exp`. Its Chat Completions image
+input is an OpenAI-compatible `content` block array on a `user` message:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "text", "text": "What is in this image?"},
+    {"type": "image_url", "image_url": {
+      "url": "https://example.com/image.png",
+      "detail": "original"
+    }}
+  ]
+}
+```
+
+`ChatBuilder.WithImageURL(url, detail...)` emits an `image_url` block for an
+absolute HTTP(S) URL. `ChatBuilder.WithImageBase64(data, mediaType, detail...)`
+encodes raw JPEG, PNG, GIF, or WebP bytes into a Base64 data URL and emits the
+same block. Calls may be mixed and repeated; at build time ds4 attaches all
+images to the final user message, irrespective of fluent-call order, and sets
+the request model to `deepseek-v4-flash-vision-exp`.
+
+The optional detail value is `low`, `high`, `original`, or `auto`. `low`
+downscales to 512x512 before inference; the other values preserve the original
+image, with `auto` currently behaving like `original`.
+
+Images are valid only in `user` messages. The supported formats are JPEG, PNG,
+GIF, and WebP. DeepSeek limits inline and URL images to 32 MiB each, permits
+600 images per request, limits the overall request body to 48 MiB, and permits
+an 8192-character URL with a 60-second download time. A maximum dimension is
+8192 pixels per side, reduced to 4096 when a request has 15 or more images.
+Use the Files API outside this package for the 64 MiB uploaded-file path.
 
 ## Thinking responses
 
@@ -146,4 +182,5 @@ applied blindly to invalid requests or authentication failures.
 - [JSON Output](https://api-docs.deepseek.com/guides/json_mode)
 - [Chat Prefix Completion](https://api-docs.deepseek.com/guides/chat_prefix_completion)
 - [FIM Completion](https://api-docs.deepseek.com/guides/fim_completion)
+- [Vision](https://api-docs.deepseek.com/guides/vision)
 - [Error Codes](https://api-docs.deepseek.com/quick_start/error_codes)

@@ -17,7 +17,7 @@ func withOfficialModels(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"}]}`)
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"},{"id":"deepseek-v4-flash-vision-exp"}]}`)
 			return
 		}
 		next(w, r)
@@ -96,6 +96,115 @@ func TestChatBuilder_Model(t *testing.T) {
 	}
 	if req.Model != ds4.ModelDeepSeekV4Pro {
 		t.Errorf("expected model %q, got %q", ds4.ModelDeepSeekV4Pro, req.Model)
+	}
+}
+
+func TestChatBuilder_WithImagesBuildsVisionRequest(t *testing.T) {
+	req, err := ds4.New("key").Chat().
+		WithImageURL("https://example.com/chart.png", ds4.ImageDetailLow).
+		User("Compare these images.").
+		WithImageBase64([]byte("image bytes"), "image/png", ds4.ImageDetailOriginal).
+		Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.Model != ds4.ModelDeepSeekV4FlashVisionExp {
+		t.Fatalf("expected vision model, got %q", req.Model)
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var user struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL *struct {
+				URL    string `json:"url"`
+				Detail string `json:"detail"`
+			} `json:"image_url"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(payload.Messages[len(payload.Messages)-1], &user); err != nil {
+		t.Fatal(err)
+	}
+	if user.Role != ds4.RoleUser || len(user.Content) != 3 {
+		t.Fatalf("expected text and two images on final user message, got %+v", user)
+	}
+	if user.Content[0].Type != "text" || user.Content[0].Text != "Compare these images." {
+		t.Errorf("unexpected text content: %+v", user.Content[0])
+	}
+	if user.Content[1].ImageURL == nil || user.Content[1].ImageURL.URL != "https://example.com/chart.png" || user.Content[1].ImageURL.Detail != ds4.ImageDetailLow {
+		t.Errorf("unexpected URL image: %+v", user.Content[1])
+	}
+	if user.Content[2].ImageURL == nil || user.Content[2].ImageURL.URL != "data:image/png;base64,aW1hZ2UgYnl0ZXM=" || user.Content[2].ImageURL.Detail != ds4.ImageDetailOriginal {
+		t.Errorf("unexpected Base64 image: %+v", user.Content[2])
+	}
+}
+
+func TestChatBuilder_WithImageUsesFinalUserAndDoesNotMutateBuilder(t *testing.T) {
+	builder := ds4.New("key").Chat().
+		User("first").
+		Assistant("answer").
+		User("final").
+		Model(ds4.ModelDeepSeekV4Pro).
+		WithImageURL("https://example.com/image.jpg")
+
+	first, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := builder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Model != ds4.ModelDeepSeekV4FlashVisionExp || second.Model != ds4.ModelDeepSeekV4FlashVisionExp {
+		t.Fatalf("image should override selected model: %q / %q", first.Model, second.Model)
+	}
+	if string(first.Messages[1].Content) != "first" || string(first.Messages[3].Content) != "final" {
+		t.Fatalf("expected image to augment only final user message: %+v", first.Messages)
+	}
+	firstBody, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstBody) != string(secondBody) {
+		t.Fatalf("repeated Build should not duplicate image attachments\nfirst:  %s\nsecond: %s", firstBody, secondBody)
+	}
+}
+
+func TestChatBuilder_WithImageValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		builder interface {
+			Build() (*ds4.ChatRequest, error)
+		}
+	}{
+		{"no user", ds4.New("key").Chat().WithImageURL("https://example.com/image.jpg")},
+		{"invalid URL", ds4.New("key").Chat().User("x").WithImageURL("file:///tmp/image.jpg")},
+		{"invalid detail", ds4.New("key").Chat().User("x").WithImageURL("https://example.com/image.jpg", "full")},
+		{"too many details", ds4.New("key").Chat().User("x").WithImageURL("https://example.com/image.jpg", ds4.ImageDetailLow, ds4.ImageDetailAuto)},
+		{"empty data", ds4.New("key").Chat().User("x").WithImageBase64(nil, "image/png")},
+		{"invalid MIME", ds4.New("key").Chat().User("x").WithImageBase64([]byte("x"), "image/svg+xml")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.builder.Build(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 

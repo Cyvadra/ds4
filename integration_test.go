@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,78 @@ func requireChatResponse(t *testing.T, response *ds4.ChatResponse) {
 	if response.Usage.TotalTokens <= 0 {
 		t.Errorf("expected token usage, got %+v", response.Usage)
 	}
+}
+
+func integrationVisionImage(t *testing.T) ([]byte, string) {
+	t.Helper()
+	path := os.Getenv("DS4_VISION_IMAGE")
+	if path == "" {
+		t.Skip("DS4_VISION_IMAGE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read DS4_VISION_IMAGE %q: %v", path, err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("DS4_VISION_IMAGE %q is empty", path)
+	}
+	mediaType, ok := visionMediaType(filepath.Ext(path))
+	if !ok {
+		t.Fatalf("DS4_VISION_IMAGE %q must have a .jpg, .jpeg, .png, .gif, or .webp extension", path)
+	}
+	return data, mediaType
+}
+
+func visionMediaType(extension string) (string, bool) {
+	switch strings.ToLower(extension) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg", true
+	case ".png":
+		return "image/png", true
+	case ".gif":
+		return "image/gif", true
+	case ".webp":
+		return "image/webp", true
+	default:
+		return "", false
+	}
+}
+
+// TestIntegration_Vision verifies that ChatBuilder sends a local image as an
+// inline Base64 vision input and that DeepSeek processes it with the experimental
+// vision model. It is intentionally opt-in because it makes a billable API call:
+//
+//	source .env
+//	DS4_VISION_IMAGE=/absolute/path/to/image.jpg go test -run '^TestIntegration_Vision$' -v
+//
+// The prompt requires an exact marker in the answer so this test verifies model
+// output rather than merely successful transport. Do not point DS4_VISION_IMAGE
+// at a sensitive image because it is uploaded to DeepSeek.
+func TestIntegration_Vision(t *testing.T) {
+	client, ctx := integrationClient(t)
+	image, mediaType := integrationVisionImage(t)
+
+	response, err := client.Chat().
+		Thinking(false).
+		UserID("ds4_integration_vision").
+		User("Describe the image in one concise sentence and include the exact word VISION_OK.").
+		WithImageBase64(image, mediaType, ds4.ImageDetailOriginal).
+		MaxTokens(128).
+		DoWithContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireChatResponse(t, response)
+	if response.Model != ds4.ModelDeepSeekV4FlashVisionExp {
+		t.Errorf("expected vision model %q, got %q", ds4.ModelDeepSeekV4FlashVisionExp, response.Model)
+	}
+	if !strings.Contains(response.Content(), "VISION_OK") {
+		t.Errorf("expected marker in vision response, got %q", response.Content())
+	}
+	if response.Content() == "" {
+		t.Error("vision response content is empty")
+	}
+	t.Log(response.Content())
 }
 
 func TestIntegration_AllFeatures(t *testing.T) {

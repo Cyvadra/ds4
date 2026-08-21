@@ -10,10 +10,24 @@
 //	fmt.Println(resp.Content())
 package ds4
 
-// Model name constants. The API accepts only these two model IDs.
+import "encoding/json"
+
+// Model name constants accepted by the official DeepSeek API.
 const (
-	ModelDeepSeekV4Flash = "deepseek-v4-flash"
-	ModelDeepSeekV4Pro   = "deepseek-v4-pro"
+	ModelDeepSeekV4Flash          = "deepseek-v4-flash"
+	ModelDeepSeekV4Pro            = "deepseek-v4-pro"
+	ModelDeepSeekV4FlashVisionExp = "deepseek-v4-flash-vision-exp"
+)
+
+// Image detail levels accepted by DeepSeek vision input. ImageDetailLow resizes
+// an image to 512x512 before inference, reducing latency and token use. The
+// other values preserve the original image; ImageDetailAuto currently behaves
+// like ImageDetailOriginal.
+const (
+	ImageDetailLow      = "low"
+	ImageDetailHigh     = "high"
+	ImageDetailOriginal = "original"
+	ImageDetailAuto     = "auto"
 )
 
 // Reasoning effort levels accepted by ReasoningEffort.
@@ -53,6 +67,64 @@ type Message struct {
 	// Prefix, when true on an assistant message, tells the model to continue
 	// generating from this content (chat prefix completion, beta).
 	Prefix bool `json:"prefix,omitempty"`
+
+	imageInputs []imageInput
+}
+
+type imageInput struct {
+	URL    string
+	Detail string
+}
+
+type messageContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text"`
+	ImageURL *imageURLPart `json:"image_url,omitempty"`
+}
+
+type imageURLPart struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// MarshalJSON preserves the standard string content representation for text
+// messages. Internal image inputs are emitted as OpenAI-compatible content
+// blocks only for messages built with ChatBuilder image attachment methods.
+func (m Message) MarshalJSON() ([]byte, error) {
+	type messageAlias Message
+	if len(m.imageInputs) == 0 {
+		return json.Marshal(messageAlias(m))
+	}
+
+	parts := make([]messageContentPart, 0, len(m.imageInputs)+1)
+	parts = append(parts, messageContentPart{Type: "text", Text: m.Content})
+	for _, image := range m.imageInputs {
+		parts = append(parts, messageContentPart{
+			Type: "image_url",
+			ImageURL: &imageURLPart{
+				URL:    image.URL,
+				Detail: image.Detail,
+			},
+		})
+	}
+
+	return json.Marshal(struct {
+		Role             string     `json:"role"`
+		Content          any        `json:"content"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
+		Name             string     `json:"name,omitempty"`
+		Prefix           bool       `json:"prefix,omitempty"`
+	}{
+		Role:             m.Role,
+		Content:          parts,
+		ReasoningContent: m.ReasoningContent,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+		Prefix:           m.Prefix,
+	})
 }
 
 // Tool represents a callable tool that the model can invoke.

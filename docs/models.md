@@ -4,19 +4,24 @@ Snapshot date: **2026-08-03**.
 
 ## Model aliases
 
-The public API exposes two V4 aliases:
+The public API exposes three V4 aliases:
 
 | API model ID | Version behind the alias | Intended tradeoff |
 | --- | --- | --- |
 | `deepseek-v4-flash` | `DeepSeek-V4-Flash-0731` | Higher throughput and lower cost |
 | `deepseek-v4-pro` | `DeepSeek-V4-Pro` | Higher-capability V4 service tier |
+| `deepseek-v4-flash-vision-exp` | `DeepSeek-V4-Flash-Vision-Exp` | Experimental multimodal image understanding |
 
 The aliases are rolling service names. In particular, DeepSeek states that
 `deepseek-v4-flash` now resolves to `DeepSeek-V4-Flash-0731` without requiring
 callers to change the model ID.
 
-Both models use the OpenAI-format base URL `https://api.deepseek.com` and
+All three models use the OpenAI-format base URL `https://api.deepseek.com` and
 support thinking and non-thinking modes. Thinking is enabled by default.
+
+The vision alias accepts text and image input. In ds4, attaching an image with
+`WithImageURL` or `WithImageBase64` automatically selects this alias for that
+request, including when another model was selected earlier in the builder.
 
 ## Client-side model routing
 
@@ -29,7 +34,7 @@ refresh the lists explicitly.
 
 ## Capacity and feature matrix
 
-| Capability | V4 Flash | V4 Pro |
+| Capability | V4 Flash | V4 Pro | V4 Flash Vision Exp |
 | --- | --- | --- |
 | Context length | 1M tokens | 1M tokens |
 | Maximum output | 384K tokens | 384K tokens |
@@ -39,6 +44,12 @@ refresh the lists explicitly.
 | Anthropic-compatible API | Yes | Yes |
 | Chat prefix completion | Beta | Beta |
 | FIM completion | Beta, non-thinking only | Beta, non-thinking only |
+| Image input | No | No | JPEG, PNG, GIF, WebP |
+
+Vision accepts up to 600 images per request. Base64 and externally fetched
+images are limited to 32 MiB each; the request body is limited to 48 MiB.
+Images are resized for inference, with a maximum of roughly 384 input tokens
+per image. See the official Vision page for the current limits and pricing.
 
 The input plus generated output must fit within the model context. A request's
 `max_tokens` controls the generated portion and does not increase the context
@@ -89,4 +100,5 @@ billing decisions.
 - [Your First API Call](https://api-docs.deepseek.com/)
 - [Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing)
 - [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion)
+- [Vision](https://api-docs.deepseek.com/guides/vision)
 - [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode)
