@@ -1058,6 +1058,31 @@ func TestClient_Chat_StreamWithContext(t *testing.T) {
 	}
 }
 
+func TestClient_Chat_Stream_NormalizesOpenRouterReasoning(t *testing.T) {
+	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning":"first "},"finish_reason":null}]}`)
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"second "}]},"finish_reason":null}]}`)
+		fmt.Fprintln(w, `data: {"id":"1","choices":[{"index":0,"delta":{"reasoning_content":"third"},"finish_reason":"stop"}]}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer srv.Close()
+
+	var reasoning strings.Builder
+	err := ds4.New("key").WithBaseURL(srv.URL).Chat().User("Hi").Stream(func(chunk ds4.ChatStreamChunk) error {
+		for _, choice := range chunk.Choices {
+			reasoning.WriteString(choice.Delta.ReasoningContent)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := reasoning.String(), "first second third"; got != want {
+		t.Errorf("reasoning = %q, want %q", got, want)
+	}
+}
+
 func TestClient_Chat_Stream_HandlerError(t *testing.T) {
 	srv := httptest.NewServer(withOfficialModels(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

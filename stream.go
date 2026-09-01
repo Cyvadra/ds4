@@ -2,6 +2,7 @@ package ds4
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"strings"
 )
@@ -30,6 +31,36 @@ type Delta struct {
 	Content          string           `json:"content"`
 	ReasoningContent string           `json:"reasoning_content,omitempty"`
 	ToolCalls        []StreamToolCall `json:"tool_calls,omitempty"`
+}
+
+// UnmarshalJSON accepts reasoning fields used by OpenAI-compatible providers.
+// reasoning_content remains canonical in the public API.
+func (d *Delta) UnmarshalJSON(data []byte) error {
+	type deltaAlias Delta
+	var wire struct {
+		deltaAlias
+		Reasoning        string            `json:"reasoning"`
+		ReasoningDetails []reasoningDetail `json:"reasoning_details"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*d = Delta(wire.deltaAlias)
+	if d.ReasoningContent != "" {
+		return nil
+	}
+	if wire.Reasoning != "" {
+		d.ReasoningContent = wire.Reasoning
+		return nil
+	}
+	for _, detail := range wire.ReasoningDetails {
+		d.ReasoningContent += detail.Text
+	}
+	return nil
+}
+
+type reasoningDetail struct {
+	Text string `json:"text"`
 }
 
 // StreamToolCall is an incremental tool call. Index identifies the call when
