@@ -33,14 +33,21 @@ type Client struct {
 	maxRetries   int
 	systemPrompt string
 
-	modelsMu      sync.Mutex
-	modelsCond    *sync.Cond
-	modelsLoading bool
-	modelsLoaded  bool
-	models        map[string]backendKind
-	officialErr   error
-	localErr      error
+	modelsMu           sync.Mutex
+	modelsCond         *sync.Cond
+	modelsLoading      bool
+	modelsLoaded       bool
+	officialModels     map[string]struct{}
+	localModels        map[string]struct{}
+	officialErr        error
+	localErr           error
+	lastForceRefreshAt time.Time
 }
+
+// unknownModelRefreshCooldown bounds how often an unrecognized model name can
+// trigger a forced re-discovery, preventing repeated bad model names from
+// hammering both backends' /models endpoints.
+const unknownModelRefreshCooldown = 5 * time.Second
 
 type backendKind uint8
 
@@ -138,15 +145,16 @@ func (c *Client) FIM() *FIMBuilder {
 	return newFIMBuilder(c)
 }
 
+type modelEntry struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Model   string   `json:"model"`
+	Aliases []string `json:"aliases"`
+}
+
 type modelList struct {
-	Data []struct {
-		ID      string   `json:"id"`
-		Aliases []string `json:"aliases"`
-	} `json:"data"`
-	Models []struct {
-		Name  string `json:"name"`
-		Model string `json:"model"`
-	} `json:"models"`
+	Data   []modelEntry `json:"data"`
+	Models []modelEntry `json:"models"`
 }
 
 // Ping refreshes the official and local model lists. Discovery failures are
@@ -162,13 +170,13 @@ func (c *Client) resolveBackend(ctx context.Context, model string) (backend, err
 	c.refreshModels(ctx, false)
 
 	c.modelsMu.Lock()
-	kind, ok := c.models[model]
+	kind, ok := c.lookupModel(model)
 	officialErr, localErr := c.officialErr, c.localErr
 	c.modelsMu.Unlock()
-	if !ok && hadLoaded && (officialErr != nil || localErr != nil) {
+	if !ok && hadLoaded && c.shouldForceRefresh(officialErr, localErr) {
 		c.refreshModels(ctx, true)
 		c.modelsMu.Lock()
-		kind, ok = c.models[model]
+		kind, ok = c.lookupModel(model)
 		officialErr, localErr = c.officialErr, c.localErr
 		c.modelsMu.Unlock()
 	}
@@ -184,6 +192,35 @@ func (c *Client) resolveBackend(ctx context.Context, model string) (backend, err
 	return backend{kind: kind, baseURL: c.baseURL, apiKey: c.apiKey}, nil
 }
 
+// lookupModel must be called with modelsMu held. Local discovery wins when
+// both sources advertise the same model, per docs/api.md.
+func (c *Client) lookupModel(model string) (backendKind, bool) {
+	if _, ok := c.localModels[model]; ok {
+		return backendLocal, true
+	}
+	if _, ok := c.officialModels[model]; ok {
+		return backendOfficial, true
+	}
+	return 0, false
+}
+
+// shouldForceRefresh reports whether an unrecognized model justifies a forced
+// re-discovery: always after a prior discovery error, otherwise at most once
+// per unknownModelRefreshCooldown so unknown model names can't be used to
+// force repeated network round-trips.
+func (c *Client) shouldForceRefresh(officialErr, localErr error) bool {
+	if officialErr != nil || localErr != nil {
+		return true
+	}
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	if time.Since(c.lastForceRefreshAt) < unknownModelRefreshCooldown {
+		return false
+	}
+	c.lastForceRefreshAt = time.Now()
+	return true
+}
+
 func (c *Client) refreshModels(ctx context.Context, force bool) error {
 	c.modelsMu.Lock()
 	for c.modelsLoading {
@@ -196,15 +233,17 @@ func (c *Client) refreshModels(ctx context.Context, force bool) error {
 	c.modelsLoading = true
 	c.modelsMu.Unlock()
 
-	models := make(map[string]backendKind)
-	officialErr := c.loadModels(ctx, backend{kind: backendOfficial, baseURL: c.baseURL, apiKey: c.apiKey}, models)
+	officialModels := make(map[string]struct{})
+	localModels := make(map[string]struct{})
+	officialErr := c.loadModels(ctx, backend{kind: backendOfficial, baseURL: c.baseURL, apiKey: c.apiKey}, officialModels)
 	var localErr error
 	if c.localURL != "" {
-		localErr = c.loadModels(ctx, backend{kind: backendLocal, baseURL: c.localURL, apiKey: c.localKey}, models)
+		localErr = c.loadModels(ctx, backend{kind: backendLocal, baseURL: c.localURL, apiKey: c.localKey}, localModels)
 	}
 
 	c.modelsMu.Lock()
-	c.models = models
+	c.officialModels = officialModels
+	c.localModels = localModels
 	c.officialErr = officialErr
 	c.localErr = localErr
 	c.modelsLoaded = true
@@ -214,7 +253,7 @@ func (c *Client) refreshModels(ctx context.Context, force bool) error {
 	return errorsJoin(officialErr, localErr)
 }
 
-func (c *Client) loadModels(ctx context.Context, target backend, models map[string]backendKind) error {
+func (c *Client) loadModels(ctx context.Context, target backend, models map[string]struct{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.baseURL+"/models", nil)
 	if err != nil {
 		return fmt.Errorf("%s models: create request: %w", target.name(), err)
@@ -239,26 +278,19 @@ func (c *Client) loadModels(ctx context.Context, target backend, models map[stri
 	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("%s models: unmarshal response: %w", target.name(), err)
 	}
-	for _, model := range list.Data {
-		if model.ID != "" {
-			models[model.ID] = target.kind
-		}
-		for _, alias := range model.Aliases {
-			if alias != "" {
-				models[alias] = target.kind
-			}
-		}
-	}
-	for _, model := range list.Models {
-		name := model.Name
-		if name == "" {
-			name = model.Model
-		}
-		if name != "" {
-			models[name] = target.kind
-		}
+	for _, model := range append(list.Data, list.Models...) {
+		addModelNames(models, model.ID, model.Name, model.Model)
+		addModelNames(models, model.Aliases...)
 	}
 	return nil
+}
+
+func addModelNames(models map[string]struct{}, names ...string) {
+	for _, name := range names {
+		if name != "" {
+			models[name] = struct{}{}
+		}
+	}
 }
 
 func (b backend) name() string {
