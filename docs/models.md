@@ -8,12 +8,12 @@ The public API exposes three V4 aliases:
 
 | API model ID | Version behind the alias | Intended tradeoff |
 | --- | --- | --- |
-| `deepseek-v4-flash` | `DeepSeek-V4-Flash-0731` | Higher throughput and lower cost |
+| `deepseek-flash` | `DeepSeek-V4-Flash-0731` | Higher throughput and lower cost |
 | `deepseek-v4-pro` | `DeepSeek-V4-Pro` | Higher-capability V4 service tier |
-| `deepseek-v4-flash-vision-exp` | `DeepSeek-V4-Flash-Vision-Exp` | Experimental multimodal image understanding |
+| `deepseek-flash` | `DeepSeek-V4-Flash-Vision-Exp` | Experimental multimodal image understanding |
 
 The aliases are rolling service names. In particular, DeepSeek states that
-`deepseek-v4-flash` now resolves to `DeepSeek-V4-Flash-0731` without requiring
+`deepseek-flash` now resolves to `DeepSeek-V4-Flash-0731` without requiring
 callers to change the model ID.
 
 All three models use the OpenAI-format base URL `https://api.deepseek.com` and

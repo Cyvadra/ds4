@@ -49,7 +49,7 @@ resp, err := client.Chat().
 | Client | `WithHTTPClient(client)` | built-in `net/http` client | Replaces the HTTP transport; avoid a client-wide timeout because it limits streams. |
 | Client | `WithRetry(n)` | `0` | Retries retryable 429, 500, and 503 responses up to `n` additional times. |
 | Chat | `System(content)`, `SystemAppend(content)`, `User(content)`, `Assistant(content)`, `ToolResult(id, content)`, `AddMessage(message)`, `WithMessages(messages)` | one default system message | Composes or replaces the conversation history. |
-| Chat and FIM | `Model(name)` | `deepseek-v4-flash` | Selects an advertised model. Official constants: `ModelDeepSeekV4Flash`, `ModelDeepSeekV4Pro`, `ModelDeepSeekV4FlashVisionExp`. |
+| Chat and FIM | `Model(name)` | `deepseek-flash` | Selects an advertised model. Official constants: `ModelDeepSeekV4Flash`, `ModelDeepSeekV4Pro`, `ModelDeepSeekV4FlashVisionExp`. |
 | Chat and FIM | `MaxTokens(n)` | API default | Limits generated tokens. FIM accepts `0` through `4096`. |
 | Chat and FIM | `Temperature(t)` | API default | Sets sampling temperature from `0` through `2`; ignored while thinking is enabled. |
 | Chat and FIM | `TopP(p)` | API default | Sets nucleus sampling from `0` through `1`; ignored while thinking is enabled. |
@@ -376,7 +376,7 @@ check fails.
 ```sh
 go run ./cmd/ds4check \
     -api-key "$DEEPSEEK_API_KEY" \
-    -model deepseek-v4-flash \
+    -model deepseek-flash \
     -tests all
 ```
 

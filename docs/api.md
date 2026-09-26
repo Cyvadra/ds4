@@ -33,22 +33,22 @@ Minimal request:
 
 ```json
 {
-  "model": "deepseek-v4-flash",
+  "model": "deepseek-flash",
   "messages": [
     {"role": "user", "content": "Hello"}
   ]
 }
 ```
 
-The documented V4 model values are `deepseek-v4-flash`, `deepseek-v4-pro`, and
-`deepseek-v4-flash-vision-exp`. Important optional Chat fields include `thinking`,
+The documented V4 model values are `deepseek-flash`, `deepseek-v4-pro`, and
+`deepseek-flash`. Important optional Chat fields include `thinking`,
 `reasoning_effort`, `max_tokens`, `response_format`, `stop`, `stream`,
 `stream_options`, `temperature`, `top_p`, `tools`, `tool_choice`, `logprobs`,
 and `top_logprobs`.
 
 ## Image understanding
 
-The vision model is `deepseek-v4-flash-vision-exp`. Its Chat Completions image
+The vision model is `deepseek-flash`. Its Chat Completions image
 input is an OpenAI-compatible `content` block array on a `user` message:
 
 ```json
@@ -69,7 +69,7 @@ absolute HTTP(S) URL. `ChatBuilder.WithImageBase64(data, mediaType, detail...)`
 encodes raw JPEG, PNG, GIF, or WebP bytes into a Base64 data URL and emits the
 same block. Calls may be mixed and repeated; at build time ds4 attaches all
 images to the final user message, irrespective of fluent-call order, and sets
-the request model to `deepseek-v4-flash-vision-exp`.
+the request model to `deepseek-flash`.
 
 The optional detail value is `low`, `high`, `original`, or `auto`. `low`
 downscales to 512x512 before inference; the other values preserve the original

@@ -14,9 +14,9 @@ import "encoding/json"
 
 // Model name constants accepted by the official DeepSeek API.
 const (
-	ModelDeepSeekV4Flash          = "deepseek-v4-flash"
+	ModelDeepSeekV4Flash          = "deepseek-flash"
 	ModelDeepSeekV4Pro            = "deepseek-v4-pro"
-	ModelDeepSeekV4FlashVisionExp = "deepseek-v4-flash-vision-exp"
+	ModelDeepSeekV4FlashVisionExp = "deepseek-flash"
 )
 
 // Image detail levels accepted by DeepSeek vision input. ImageDetailLow resizes
@@ -32,7 +32,7 @@ const (
 
 // Reasoning effort levels accepted by ReasoningEffort.
 //
-// deepseek-v4-flash honours all three. deepseek-v4-pro currently maps
+// deepseek-flash honours all three. deepseek-v4-pro currently maps
 // EffortLow up to EffortHigh.
 const (
 	EffortLow  = "low"

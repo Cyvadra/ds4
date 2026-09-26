@@ -17,7 +17,7 @@ func withOfficialModels(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"},{"id":"deepseek-v4-flash-vision-exp"}]}`)
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"},{"id":"deepseek-flash"}]}`)
 			return
 		}
 		next(w, r)
@@ -789,7 +789,7 @@ func TestClient_Chat_DecodesLogProbs(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{
-			"id":"chatcmpl-test","model":"deepseek-v4-flash",
+			"id":"chatcmpl-test","model":"deepseek-flash",
 			"choices":[{"index":0,"finish_reason":"stop",
 				"message":{"role":"assistant","content":"hi"},
 				"logprobs":{"content":[{"token":"hi","logprob":-0.25,

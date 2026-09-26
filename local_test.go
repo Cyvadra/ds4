@@ -592,7 +592,7 @@ func TestModelRouting_RetriesFailedLlamaCppDiscovery(t *testing.T) {
 	var localModels, localChats atomic.Int32
 	official := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/models" {
-			fmt.Fprint(w, `{"data":[{"id":"deepseek-v4-flash"}]}`)
+			fmt.Fprint(w, `{"data":[{"id":"deepseek-flash"}]}`)
 			return
 		}
 		http.NotFound(w, r)
