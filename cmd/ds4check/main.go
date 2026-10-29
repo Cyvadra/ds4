@@ -1,4 +1,5 @@
-// Command ds4check exercises a real DeepSeek or OpenAI-compatible deployment.
+// Command ds4check exercises a real DeepSeek, OpenAI-compatible, or
+// Anthropic Messages deployment.
 package main
 
 import (
@@ -25,14 +26,18 @@ func main() {
 	baseURL := flag.String("base-url", os.Getenv("DEEPSEEK_BASE_URL"), "official API base URL")
 	localURL := flag.String("local-url", os.Getenv("DS4_LOCAL_URL"), "local OpenAI-compatible API base URL")
 	localKey := flag.String("local-key", os.Getenv("DS4_LOCAL_KEY"), "local API key")
+	anthropicURL := flag.String("anthropic-url", os.Getenv("DS4_ANTHROPIC_URL"), "Anthropic Messages API base URL, without /v1")
+	anthropicKey := flag.String("anthropic-key", envOr("DS4_ANTHROPIC_KEY", os.Getenv("ANTHROPIC_API_KEY")), "Anthropic backend API key")
+	anthropicWorkspace := flag.String("anthropic-workspace", os.Getenv("DS4_ANTHROPIC_WORKSPACE"), "anthropic-workspace-id header for keys not scoped to a workspace")
+	anthropicModels := flag.String("anthropic-models", os.Getenv("DS4_ANTHROPIC_MODELS"), "comma-separated models served by the Anthropic backend; skips /v1/models discovery")
 	model := flag.String("model", os.Getenv("DS4_MODEL"), "model to test (required)")
 	tests := flag.String("tests", "models,chat,json,stream,tools", "comma-separated checks: models,chat,json,stream,tools,thinking,prefix,fim,all")
 	timeout := flag.Duration("timeout", 3*time.Minute, "timeout for each check")
 	retries := flag.Int("retries", 1, "retry count for retryable API failures")
 	flag.Parse()
 
-	if *apiKey == "" && *localURL == "" {
-		fail("supply -api-key (or DEEPSEEK_API_KEY), or -local-url for a local server")
+	if *apiKey == "" && *localURL == "" && *anthropicURL == "" {
+		fail("supply -api-key (or DEEPSEEK_API_KEY), -local-url for a local server, or -anthropic-url")
 	}
 	if *model == "" {
 		fail("supply -model (or DS4_MODEL); this prevents unexpected billable model selection")
@@ -44,6 +49,12 @@ func main() {
 	}
 	if *localURL != "" {
 		client.WithLocalKey(*localKey).WithLocalURL(*localURL).WithLocalFIM(true)
+	}
+	if *anthropicURL != "" {
+		client.WithAnthropicKey(*anthropicKey).WithAnthropicURL(*anthropicURL).WithAnthropicWorkspace(*anthropicWorkspace)
+		if *anthropicModels != "" {
+			client.WithAnthropicModels(strings.Split(*anthropicModels, ",")...)
+		}
 	}
 
 	selected, err := parseChecks(*tests)
@@ -253,6 +264,13 @@ func formatFIMResponse(response *ds4.FIMResponse) string {
 		return fmt.Sprintf("response: %+v", response)
 	}
 	return string(data)
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func fail(message string) {

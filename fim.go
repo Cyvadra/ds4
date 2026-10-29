@@ -205,6 +205,9 @@ func (b *FIMBuilder) DoWithContext(ctx context.Context) (*FIMResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	if target.kind == backendAnthropic {
+		return nil, errFIMAnthropic
+	}
 
 	if target.kind == backendLocal {
 		return b.doLocal(ctx, target, req)
@@ -239,6 +242,8 @@ func (b *FIMBuilder) doLocal(ctx context.Context, target backend, req *FIMReques
 	return &resp, nil
 }
 
+var errFIMAnthropic = fmt.Errorf("ds4: fim: not supported on the anthropic backend")
+
 // Stream sends the FIM request with streaming enabled and calls handler for
 // each FIMStreamChunk. Return a non-nil error from handler to abort early.
 func (b *FIMBuilder) Stream(handler func(FIMStreamChunk) error) error {
@@ -254,6 +259,9 @@ func (b *FIMBuilder) StreamWithContext(ctx context.Context, handler func(FIMStre
 	target, err := b.client.resolveBackend(ctx, req.Model)
 	if err != nil {
 		return err
+	}
+	if target.kind == backendAnthropic {
+		return errFIMAnthropic
 	}
 
 	if target.kind == backendLocal {

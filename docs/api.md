@@ -20,6 +20,15 @@ first completion request, the client loads `/models` from each configured
 backend. It loads official models first and local models second, so a duplicate
 model ID routes to the local endpoint.
 
+An optional Anthropic Messages backend (`WithAnthropicURL`) is discovered
+through `GET /v1/models` with `x-api-key` and `anthropic-version` headers, or
+registered statically with `WithAnthropicModels`. Keys not scoped to a
+workspace also need `WithAnthropicWorkspace`, which sends
+`anthropic-workspace-id`. Dated IDs such as `claude-haiku-4-5-20251001` are
+also registered under their undated alias. Precedence for duplicate IDs
+is local, then Anthropic, then official. Its completions use
+`POST /v1/messages`.
+
 The routing map is retained in memory for the client lifetime. `Ping()` forces
 a refresh and reports discovery errors; without `Ping`, later requests do not
 repeat model discovery. A failure from one backend does not remove models

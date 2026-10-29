@@ -1,7 +1,8 @@
 # ds4
 
 A fluent Go client for the [DeepSeek API](https://api-docs.deepseek.com/) with
-model-aware routing for optional OpenAI-compatible local deployments.
+model-aware routing for optional OpenAI-compatible local deployments and
+Anthropic Messages API servers.
 
 ## Install
 
@@ -46,6 +47,11 @@ resp, err := client.Chat().
 | Client | `WithLocalURL(url)` | disabled | Adds an OpenAI-compatible server to model routing. |
 | Client | `WithLocalKey(key)` | empty | Sets the credential for the local server. |
 | Client | `WithLocalFIM(enabled)` | `false` | Enables local FIM requests through `/completions`. |
+| Client | `WithAnthropicURL(url)` | disabled | Adds an Anthropic Messages API server (base URL without `/v1`) to model routing. |
+| Client | `WithAnthropicKey(key)` | empty | Sets the `x-api-key` credential for the Anthropic backend. |
+| Client | `WithAnthropicVersion(v)` | `2023-06-01` | Sets the `anthropic-version` header. |
+| Client | `WithAnthropicWorkspace(id)` | empty | Sends `anthropic-workspace-id`, required for keys not scoped to a workspace. |
+| Client | `WithAnthropicModels(names...)` | discover via `/v1/models` | Registers Anthropic-backend models statically, for servers without a models endpoint. |
 | Client | `WithHTTPClient(client)` | built-in `net/http` client | Replaces the HTTP transport; avoid a client-wide timeout because it limits streams. |
 | Client | `WithRetry(n)` | `0` | Retries retryable 429, 500, and 503 responses up to `n` additional times. |
 | Chat | `System(content)`, `SystemAppend(content)`, `User(content)`, `Assistant(content)`, `ToolResult(id, content)`, `AddMessage(message)`, `WithMessages(messages)` | one default system message | Composes or replaces the conversation history. |
@@ -65,8 +71,74 @@ resp, err := client.Chat().
 | Chat | `WithImageBase64(data, mediaType, detail...)` | none | Encodes raw JPEG, PNG, GIF, or WebP bytes as an image attachment and automatically uses the vision model. |
 | FIM | `Prompt(text)` / `Suffix(text)` | prompt required; no suffix | Sets the text before and after the insertion point. |
 | FIM | `Echo()` | disabled | Includes the prompt in the response text. |
-| `ds4check` | `-api-key`, `-base-url`, `-local-url`, `-local-key`, `-model` | environment equivalents or empty | Selects the deployment and an explicitly named model. Environment equivalents are `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DS4_LOCAL_URL`, `DS4_LOCAL_KEY`, and `DS4_MODEL`. |
+| `ds4check` | `-api-key`, `-base-url`, `-local-url`, `-local-key`, `-anthropic-url`, `-anthropic-key`, `-anthropic-models`, `-model` | environment equivalents or empty | Selects the deployment and an explicitly named model. Environment equivalents are `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DS4_LOCAL_URL`, `DS4_LOCAL_KEY`, `DS4_ANTHROPIC_URL`, `DS4_ANTHROPIC_KEY` (falling back to `ANTHROPIC_API_KEY`), `DS4_ANTHROPIC_MODELS`, and `DS4_MODEL`. |
 | `ds4check` | `-tests`, `-timeout`, `-retries` | `models,chat,json,stream,tools`; `3m`; `1` | Selects checks, sets a per-check deadline, and retries transient API failures. |
+
+## Anthropic Messages backend
+
+`WithAnthropicURL` adds a server that speaks the Anthropic Messages API
+(`POST /v1/messages`). It works with Claude and with DeepSeek's
+Anthropic-compatible endpoint. Requests are routed by model name like the other
+backends; when several backends advertise a name, local wins, then Anthropic,
+then official.
+
+```go
+client := ds4.New(os.Getenv("DEEPSEEK_API_KEY")).
+    WithAnthropicURL("https://api.anthropic.com").
+    WithAnthropicKey(os.Getenv("ANTHROPIC_API_KEY"))
+
+resp, err := client.Chat().Model("claude-opus-5-5").User("Hello").Do()
+
+// Keys that are not scoped to one workspace must name the workspace,
+// otherwise every request fails with HTTP 400.
+client.WithAnthropicWorkspace("wrkspc_...")
+
+// DeepSeek's endpoint has no /v1/models, so register its models explicitly.
+deepseek := ds4.New("").
+    WithAnthropicURL("https://api.deepseek.com/anthropic").
+    WithAnthropicKey(os.Getenv("DEEPSEEK_API_KEY")).
+    WithAnthropicModels(ds4.ModelDeepSeekV4Pro)
+```
+
+The same builder methods and response types are used:
+
+| Builder feature | Anthropic request |
+|---|---|
+| System messages | joined in order into top-level `system` |
+| `MaxTokens` | `max_tokens`, default `DefaultAnthropicMaxTokens` (16000) |
+| `Stop`, `UserID` | `stop_sequences`, `metadata.user_id` |
+| `Thinking(true)` / `ThinkingMode()` | `thinking: {type: "adaptive", display: "summarized"}` |
+| `Thinking(false)` | `thinking: {type: "disabled"}` |
+| `ReasoningEffort(level)` | `output_config.effort` |
+| Tools, `ToolCalls`, `ToolResult` | `tools`, `tool_use`, `tool_result` blocks |
+| `ToolChoice` `"auto"`/`"none"`/`"required"`/function map | `auto`/`none`/`any`/`tool` |
+| `WithImageURL` / `WithImageBase64` | `image` blocks; the selected model is kept |
+
+**Workspace:** an Anthropic API key that is not scoped to a single workspace
+is rejected with `HTTP 400: This API key is not scoped to a workspace` unless
+you call `WithAnthropicWorkspace` (or pass `-anthropic-workspace` /
+`DS4_ANTHROPIC_WORKSPACE` to `ds4check`). Find the ID under Workspaces in the
+Claude Console.
+
+**Model names:** `/v1/models` lists some models only by dated ID
+(`claude-haiku-4-5-20251001`). ds4 also registers the undated alias
+(`claude-haiku-4-5`), so either name routes to the Anthropic backend.
+
+`JSONMode`, `LogProbs`, and FIM return an error on this backend. Responses
+report thinking as `ReasoningContent` and map `stop_reason` to the usual
+finish reasons.
+
+To continue a tool-use loop with thinking, append the assistant message with
+`AppendResponse`. For a stream, collect the chunks with `ChatStreamAccumulator`
+and pass `acc.Message()` to `AddMessage`. Both keep the original content blocks,
+including thinking signatures, and replay them verbatim. JSON serialization of a
+`Message` does not keep them.
+
+Current Claude models reject some settings: `Thinking(false)`, `Temperature`,
+`TopP`, forced `ToolChoice`, and assistant prefill (`Prefix`, `Continue`). On
+those models, use `ReasoningEffort` and `"auto"` tool choice instead. Older
+models without adaptive thinking, such as Claude Haiku 4.5, reject
+`ThinkingMode()`; leave thinking unset for them.
 
 ## Chat completions
 

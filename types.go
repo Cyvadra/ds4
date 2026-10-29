@@ -69,6 +69,10 @@ type Message struct {
 	Prefix bool `json:"prefix,omitempty"`
 
 	imageInputs []imageInput
+	// anthropicContent holds the raw content blocks of an assistant message
+	// returned by the Anthropic backend, replayed verbatim so thinking
+	// signatures survive multi-turn tool use. It is never marshalled.
+	anthropicContent json.RawMessage
 }
 
 type imageInput struct {

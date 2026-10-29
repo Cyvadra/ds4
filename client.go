@@ -18,20 +18,29 @@ import (
 // DefaultBaseURL is the root URL for all DeepSeek API calls.
 const DefaultBaseURL = "https://api.deepseek.com"
 
+// DefaultAnthropicVersion is the anthropic-version header sent to the
+// Anthropic Messages backend unless WithAnthropicVersion overrides it.
+const DefaultAnthropicVersion = "2023-06-01"
+
 // DefaultSystemPrompt is included as the first message of every new chat.
 const DefaultSystemPrompt = "You are a helpful assistant."
 
 // Client is the entry point for all DeepSeek API interactions.
 // Create one with New and then call Chat() or FIM() to start building requests.
 type Client struct {
-	apiKey       string
-	baseURL      string
-	localKey     string
-	localURL     string
-	localFIM     bool
-	httpClient   *http.Client
-	maxRetries   int
-	systemPrompt string
+	apiKey             string
+	baseURL            string
+	localKey           string
+	localURL           string
+	localFIM           bool
+	anthropicURL       string
+	anthropicKey       string
+	anthropicVersion   string
+	anthropicStatic    []string
+	anthropicWorkspace string
+	httpClient         *http.Client
+	maxRetries         int
+	systemPrompt       string
 
 	modelsMu           sync.Mutex
 	modelsCond         *sync.Cond
@@ -39,8 +48,10 @@ type Client struct {
 	modelsLoaded       bool
 	officialModels     map[string]struct{}
 	localModels        map[string]struct{}
+	anthropicModels    map[string]struct{}
 	officialErr        error
 	localErr           error
+	anthropicErr       error
 	lastForceRefreshAt time.Time
 }
 
@@ -54,12 +65,15 @@ type backendKind uint8
 const (
 	backendOfficial backendKind = iota
 	backendLocal
+	backendAnthropic
 )
 
 type backend struct {
-	kind    backendKind
-	baseURL string
-	apiKey  string
+	kind      backendKind
+	baseURL   string
+	apiKey    string
+	version   string
+	workspace string
 }
 
 // New creates a new Client authenticated with apiKey. An optional defaultSystemPrompt
@@ -76,9 +90,10 @@ func New(apiKey string, defaultSystemPrompt ...string) *Client {
 		systemPrompt = defaultSystemPrompt[0]
 	}
 	client := &Client{
-		apiKey:       apiKey,
-		baseURL:      DefaultBaseURL,
-		systemPrompt: systemPrompt,
+		apiKey:           apiKey,
+		baseURL:          DefaultBaseURL,
+		anthropicVersion: DefaultAnthropicVersion,
+		systemPrompt:     systemPrompt,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -117,6 +132,43 @@ func (c *Client) WithLocalURL(url string) *Client {
 // WithLocalFIM enables adapting local FIM requests to /completions.
 func (c *Client) WithLocalFIM(enabled bool) *Client {
 	c.localFIM = enabled
+	return c
+}
+
+// WithAnthropicURL adds a server speaking the Anthropic Messages API to model
+// routing, such as https://api.anthropic.com or DeepSeek's
+// https://api.deepseek.com/anthropic. The URL excludes the /v1 segment.
+func (c *Client) WithAnthropicURL(url string) *Client {
+	c.anthropicURL = strings.TrimRight(url, "/")
+	return c
+}
+
+// WithAnthropicKey sets the x-api-key credential for the Anthropic backend.
+// An empty key omits the header.
+func (c *Client) WithAnthropicKey(key string) *Client {
+	c.anthropicKey = key
+	return c
+}
+
+// WithAnthropicVersion overrides the anthropic-version header
+// (default DefaultAnthropicVersion).
+func (c *Client) WithAnthropicVersion(version string) *Client {
+	c.anthropicVersion = version
+	return c
+}
+
+// WithAnthropicWorkspace sends the anthropic-workspace-id header, which the
+// Anthropic API requires for keys that are not scoped to a single workspace.
+func (c *Client) WithAnthropicWorkspace(id string) *Client {
+	c.anthropicWorkspace = id
+	return c
+}
+
+// WithAnthropicModels registers model names for the Anthropic backend instead
+// of discovering them through GET /v1/models. Use it for compatible servers
+// that do not expose a models endpoint.
+func (c *Client) WithAnthropicModels(models ...string) *Client {
+	c.anthropicStatic = append([]string(nil), models...)
 	return c
 }
 
@@ -171,32 +223,49 @@ func (c *Client) resolveBackend(ctx context.Context, model string) (backend, err
 
 	c.modelsMu.Lock()
 	kind, ok := c.lookupModel(model)
-	officialErr, localErr := c.officialErr, c.localErr
+	discoveryErr := c.discoveryErrLocked()
 	c.modelsMu.Unlock()
-	if !ok && hadLoaded && c.shouldForceRefresh(officialErr, localErr) {
+	if !ok && hadLoaded && c.shouldForceRefresh(discoveryErr) {
 		c.refreshModels(ctx, true)
 		c.modelsMu.Lock()
 		kind, ok = c.lookupModel(model)
-		officialErr, localErr = c.officialErr, c.localErr
+		discoveryErr = c.discoveryErrLocked()
 		c.modelsMu.Unlock()
 	}
 	if !ok {
-		if officialErr != nil || localErr != nil {
-			return backend{}, fmt.Errorf("ds4: unknown model %q (model discovery incomplete: %w)", model, errorsJoin(officialErr, localErr))
+		if discoveryErr != nil {
+			return backend{}, fmt.Errorf("ds4: unknown model %q (model discovery incomplete: %w)", model, discoveryErr)
 		}
 		return backend{}, fmt.Errorf("ds4: unknown model %q", model)
 	}
-	if kind == backendLocal {
-		return backend{kind: kind, baseURL: c.localURL, apiKey: c.localKey}, nil
+	return c.backendFor(kind), nil
+}
+
+func (c *Client) backendFor(kind backendKind) backend {
+	switch kind {
+	case backendLocal:
+		return backend{kind: kind, baseURL: c.localURL, apiKey: c.localKey}
+	case backendAnthropic:
+		return backend{kind: kind, baseURL: c.anthropicURL, apiKey: c.anthropicKey, version: c.anthropicVersion, workspace: c.anthropicWorkspace}
+	default:
+		return backend{kind: kind, baseURL: c.baseURL, apiKey: c.apiKey}
 	}
-	return backend{kind: kind, baseURL: c.baseURL, apiKey: c.apiKey}, nil
+}
+
+// discoveryErrLocked must be called with modelsMu held.
+func (c *Client) discoveryErrLocked() error {
+	return errorsJoin(c.officialErr, c.localErr, c.anthropicErr)
 }
 
 // lookupModel must be called with modelsMu held. Local discovery wins when
-// both sources advertise the same model, per docs/api.md.
+// several sources advertise the same model, then the Anthropic backend, per
+// docs/api.md.
 func (c *Client) lookupModel(model string) (backendKind, bool) {
 	if _, ok := c.localModels[model]; ok {
 		return backendLocal, true
+	}
+	if _, ok := c.anthropicModels[model]; ok {
+		return backendAnthropic, true
 	}
 	if _, ok := c.officialModels[model]; ok {
 		return backendOfficial, true
@@ -208,8 +277,8 @@ func (c *Client) lookupModel(model string) (backendKind, bool) {
 // re-discovery: always after a prior discovery error, otherwise at most once
 // per unknownModelRefreshCooldown so unknown model names can't be used to
 // force repeated network round-trips.
-func (c *Client) shouldForceRefresh(officialErr, localErr error) bool {
-	if officialErr != nil || localErr != nil {
+func (c *Client) shouldForceRefresh(discoveryErr error) bool {
+	if discoveryErr != nil {
 		return true
 	}
 	c.modelsMu.Lock()
@@ -238,7 +307,16 @@ func (c *Client) refreshModels(ctx context.Context, force bool) error {
 	officialErr := c.loadModels(ctx, backend{kind: backendOfficial, baseURL: c.baseURL, apiKey: c.apiKey}, officialModels)
 	var localErr error
 	if c.localURL != "" {
-		localErr = c.loadModels(ctx, backend{kind: backendLocal, baseURL: c.localURL, apiKey: c.localKey}, localModels)
+		localErr = c.loadModels(ctx, c.backendFor(backendLocal), localModels)
+	}
+	anthropicModels := make(map[string]struct{})
+	var anthropicErr error
+	if c.anthropicURL != "" {
+		if len(c.anthropicStatic) > 0 {
+			addModelNames(anthropicModels, c.anthropicStatic...)
+		} else {
+			anthropicErr = c.loadModels(ctx, c.backendFor(backendAnthropic), anthropicModels)
+		}
 	}
 
 	c.modelsMu.Lock()
@@ -246,21 +324,25 @@ func (c *Client) refreshModels(ctx context.Context, force bool) error {
 	c.localModels = localModels
 	c.officialErr = officialErr
 	c.localErr = localErr
+	c.anthropicModels = anthropicModels
+	c.anthropicErr = anthropicErr
 	c.modelsLoaded = true
 	c.modelsLoading = false
 	c.modelsCond.Broadcast()
 	c.modelsMu.Unlock()
-	return errorsJoin(officialErr, localErr)
+	return errorsJoin(officialErr, localErr, anthropicErr)
 }
 
 func (c *Client) loadModels(ctx context.Context, target backend, models map[string]struct{}) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.baseURL+"/models", nil)
+	path := "/models"
+	if target.kind == backendAnthropic {
+		path = "/v1/models?limit=1000"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.baseURL+path, nil)
 	if err != nil {
 		return fmt.Errorf("%s models: create request: %w", target.name(), err)
 	}
-	if target.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+target.apiKey)
-	}
+	target.setAuth(req)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -281,8 +363,27 @@ func (c *Client) loadModels(ctx context.Context, target backend, models map[stri
 	for _, model := range append(list.Data, list.Models...) {
 		addModelNames(models, model.ID, model.Name, model.Model)
 		addModelNames(models, model.Aliases...)
+		if target.kind == backendAnthropic {
+			addModelNames(models, undatedModelID(model.ID))
+		}
 	}
 	return nil
+}
+
+// undatedModelID returns the short alias of a dated Anthropic model ID, such as
+// claude-haiku-4-5 for claude-haiku-4-5-20251001, or "" when id has no date.
+// The Anthropic API accepts both forms but lists only the dated one.
+func undatedModelID(id string) string {
+	cut := strings.LastIndexByte(id, '-')
+	if cut < 0 || len(id)-cut-1 != 8 {
+		return ""
+	}
+	for _, r := range id[cut+1:] {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return id[:cut]
 }
 
 func addModelNames(models map[string]struct{}, names ...string) {
@@ -294,21 +395,55 @@ func addModelNames(models map[string]struct{}, names ...string) {
 }
 
 func (b backend) name() string {
-	if b.kind == backendLocal {
+	switch b.kind {
+	case backendLocal:
 		return "local"
+	case backendAnthropic:
+		return "anthropic"
+	default:
+		return "official"
 	}
-	return "official"
 }
 
-func errorsJoin(officialErr, localErr error) error {
-	switch {
-	case officialErr != nil && localErr != nil:
-		return fmt.Errorf("official: %v; local: %w", officialErr, localErr)
-	case officialErr != nil:
-		return officialErr
-	default:
-		return localErr
+// setAuth applies the credential headers expected by the backend's protocol.
+func (b backend) setAuth(req *http.Request) {
+	if b.kind == backendAnthropic {
+		if b.apiKey != "" {
+			req.Header.Set("x-api-key", b.apiKey)
+		}
+		req.Header.Set("anthropic-version", b.version)
+		if b.workspace != "" {
+			req.Header.Set("anthropic-workspace-id", b.workspace)
+		}
+		return
 	}
+	if b.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.apiKey)
+	}
+}
+
+// errorsJoin combines per-backend discovery errors in official, local,
+// anthropic order. A single error is returned unchanged.
+func errorsJoin(errs ...error) error {
+	names := []string{"official", "local", "anthropic"}
+	var present []int
+	for index, err := range errs {
+		if err != nil {
+			present = append(present, index)
+		}
+	}
+	switch len(present) {
+	case 0:
+		return nil
+	case 1:
+		return errs[present[0]]
+	}
+	parts := make([]string, 0, len(present)-1)
+	for _, index := range present[:len(present)-1] {
+		parts = append(parts, fmt.Sprintf("%s: %v", names[index], errs[index]))
+	}
+	last := present[len(present)-1]
+	return fmt.Errorf("%s; %s: %w", strings.Join(parts, "; "), names[last], errs[last])
 }
 
 // send builds and dispatches a single HTTP attempt.
@@ -317,9 +452,7 @@ func (c *Client) send(ctx context.Context, target backend, method, path string, 
 	if err != nil {
 		return nil, fmt.Errorf("ds4: create request: %w", err)
 	}
-	if target.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+target.apiKey)
-	}
+	target.setAuth(req)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
 
@@ -438,10 +571,13 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("ds4: HTTP %d: %s", e.StatusCode, e.Message)
 }
 
+// statusOverloaded is the Anthropic API's non-standard "overloaded" status.
+const statusOverloaded = 529
+
 // IsRetryable reports whether the request may succeed if retried after a wait.
 func (e *APIError) IsRetryable() bool {
 	switch e.StatusCode {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable, statusOverloaded:
 		return true
 	default:
 		return false

@@ -661,17 +661,12 @@ func (b *ChatBuilder) Do() (*ChatResponse, error) {
 
 // DoWithContext is like Do but honours ctx for cancellation and deadlines.
 func (b *ChatBuilder) DoWithContext(ctx context.Context) (*ChatResponse, error) {
-	req, err := b.Build()
+	req, target, err := b.prepare(ctx)
 	if err != nil {
 		return nil, err
 	}
-	target, err := b.client.resolveBackend(ctx, req.Model)
-	if err != nil {
-		return nil, err
-	}
-	if target.kind == backendLocal {
-		req.Thinking = nil
-		req.ReasoningEffort = ""
+	if target.kind == backendAnthropic {
+		return b.doAnthropic(ctx, target, req)
 	}
 
 	data, err := b.client.doRequest(ctx, target, "POST", b.endpoint(target), req)
@@ -690,6 +685,32 @@ func (b *ChatBuilder) DoWithContext(ctx context.Context) (*ChatResponse, error) 
 	return &resp, nil
 }
 
+// prepare builds the request, resolves its backend, and applies the
+// per-backend adjustments.
+func (b *ChatBuilder) prepare(ctx context.Context) (*ChatRequest, backend, error) {
+	req, err := b.Build()
+	if err != nil {
+		return nil, backend{}, err
+	}
+	if len(b.images) > 0 && req.Model != b.model {
+		// Images select the DeepSeek vision model unless the chosen model is
+		// served by the Anthropic backend, which accepts images natively.
+		if target, err := b.client.resolveBackend(ctx, b.model); err == nil && target.kind == backendAnthropic {
+			req.Model = b.model
+			return req, target, nil
+		}
+	}
+	target, err := b.client.resolveBackend(ctx, req.Model)
+	if err != nil {
+		return nil, backend{}, err
+	}
+	if target.kind == backendLocal {
+		req.Thinking = nil
+		req.ReasoningEffort = ""
+	}
+	return req, target, nil
+}
+
 // Stream sends the request with streaming enabled and calls handler for each
 // ChatStreamChunk. Return a non-nil error from handler to abort early.
 func (b *ChatBuilder) Stream(handler func(ChatStreamChunk) error) error {
@@ -698,17 +719,12 @@ func (b *ChatBuilder) Stream(handler func(ChatStreamChunk) error) error {
 
 // StreamWithContext is like Stream but honours ctx for cancellation and deadlines.
 func (b *ChatBuilder) StreamWithContext(ctx context.Context, handler func(ChatStreamChunk) error) error {
-	req, err := b.Build()
+	req, target, err := b.prepare(ctx)
 	if err != nil {
 		return err
 	}
-	target, err := b.client.resolveBackend(ctx, req.Model)
-	if err != nil {
-		return err
-	}
-	if target.kind == backendLocal {
-		req.Thinking = nil
-		req.ReasoningEffort = ""
+	if target.kind == backendAnthropic {
+		return b.streamAnthropic(ctx, target, req, handler)
 	}
 	req.Stream = true
 	if b.includeUsage {

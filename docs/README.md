@@ -29,4 +29,5 @@ current production values matter.
 | Documentation changes | [Change Log](https://api-docs.deepseek.com/updates) |
 
 DeepSeek documents both OpenAI-compatible and Anthropic-compatible interfaces.
-This repository uses the OpenAI-compatible HTTP interface.
+ds4 uses the OpenAI-compatible interface by default and can also route
+models to an Anthropic Messages backend (`WithAnthropicURL`).
