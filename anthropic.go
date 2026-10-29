@@ -18,8 +18,6 @@ type anthropicRequest struct {
 	MaxTokens     int                    `json:"max_tokens"`
 	System        []anthropicBlock       `json:"system,omitempty"`
 	Messages      []anthropicMessage     `json:"messages"`
-	Temperature   *float64               `json:"temperature,omitempty"`
-	TopP          *float64               `json:"top_p,omitempty"`
 	StopSequences []string               `json:"stop_sequences,omitempty"`
 	Stream        bool                   `json:"stream,omitempty"`
 	Thinking      *anthropicThinking     `json:"thinking,omitempty"`
@@ -134,8 +132,6 @@ func toAnthropicRequest(req *ChatRequest) (*anthropicRequest, error) {
 	out := &anthropicRequest{
 		Model:         req.Model,
 		MaxTokens:     req.MaxTokens,
-		Temperature:   req.Temperature,
-		TopP:          req.TopP,
 		StopSequences: req.Stop,
 	}
 	if out.MaxTokens == 0 {

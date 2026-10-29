@@ -134,8 +134,8 @@ and pass `acc.Message()` to `AddMessage`. Both keep the original content blocks,
 including thinking signatures, and replay them verbatim. JSON serialization of a
 `Message` does not keep them.
 
-Current Claude models reject some settings: `Thinking(false)`, `Temperature`,
-`TopP`, forced `ToolChoice`, and assistant prefill (`Prefix`, `Continue`). On
+`Temperature` and `TopP` are not sent on the anthropic backend. Current Claude
+models reject some other settings: `Thinking(false)`, forced `ToolChoice`, and assistant prefill (`Prefix`, `Continue`). On
 those models, use `ReasoningEffort` and `"auto"` tool choice instead. Older
 models without adaptive thinking, such as Claude Haiku 4.5, reject
 `ThinkingMode()`; leave thinking unset for them.
